@@ -179,7 +179,7 @@ test('apply registers the composer button, the strip and the shortcut', async ()
   assert.equal(typeof strip.component, 'function')
 
   assert.equal(shortcutScopeUsed, true, 'the shortcut is registered inside a shortcuts scope')
-  assert.deepEqual(injectCalls.sort(), [['layout'], ['sessions'], ['shortcuts']],
+  assert.deepEqual(injectCalls.sort(), [['layout'], ['modelDirectories'], ['sessions'], ['shortcuts']],
     'optional services are requested through their own scopes instead of undeclared property reads')
   assert.equal(commands.length, 1, 'one shortcut command')
   const command = commands[0]

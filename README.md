@@ -19,6 +19,7 @@ their current meaning.
 | **Dialog** | Date, hour 1–12, minute, AM/PM, quick picks, a "Sends …" summary, and an optional **Repeat** row. Backdrop/Escape close, focus returns to the composer. |
 | **Strip** | Above the composer: `2 scheduled · next Fri, 14 Nov, 9:00 am`, expandable to rows with **Send now**, **Change time**, **Cancel**, and **Retry** for a failed delivery. |
 | **Repeat** | Creates a task in DSH's own Automation service and opens its task page. Blocked when the draft has images or files. |
+| **Peak-price hint** | When the chosen time lands in DeepSeek's peak window and the session runs a DeepSeek model, the dialog adds one orange line naming the window in your own time zone. Weekends and off-peak hours are half price. |
 | **Phone** | Bottom sheet under 640 px, 44 px targets, 16 px inputs (no zoom-on-focus), safe-area padding. |
 | **Theme** | Host tokens for every surface and text colour; the accent orange is the only literal colour. English and Chinese dictionaries ship complete. |
 

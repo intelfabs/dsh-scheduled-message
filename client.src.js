@@ -102,6 +102,56 @@ export function createClientPlugin(require) {
     return useSyncExternalStore(subscribeRefresh, () => refreshSeq, () => 0)
   }
 
+  /**
+   * The session's current model id, read from the same shared directory the
+   * composer's model seat renders, so the dialog follows a model switch live.
+   * @param sessionId - owning conversation, or undefined outside a seat.
+   * @returns the model id, or null when the profile has no model selection.
+   */
+  /**
+   * The Session's durable model selection, read straight from its projection.
+   *
+   * A fallback for the first paint, or a profile whose model catalog failed to
+   * load, where the shared directory has no `current` yet. Every step is
+   * optional-chained: an unexpected shape answers null instead of throwing.
+   * @param sessionId - owning conversation.
+   * @returns the model id, or null when the projection cannot be read.
+   */
+  function projectSessionModel(sessionId) {
+    try {
+      const face = services.sessions?.binding?.(sessionId)?.session?.projections?.faceOf?.('modelSelection')
+      const projected = face?.getSnapshot?.()
+      const selection = projected?.next ?? projected?.lastUsed ?? null
+      return typeof selection?.model === 'string' ? selection.model : null
+    } catch {
+      return null
+    }
+  }  function useSessionModelName(sessionId) {
+    const store = useMemo(() => {
+      const resolver = services.modelDirectories
+      if (resolver === undefined || sessionId === undefined || typeof resolver.directoryFor !== 'function') return null
+      try {
+        return resolver.directoryFor(sessionId)?.store ?? null
+      } catch {
+        return null
+      }
+    }, [sessionId])
+    const subscribe = useCallback(
+      (listener) => (store === null ? () => {} : store.subscribe(() => listener())),
+      [store],
+    )
+    const state = useSyncExternalStore(
+      subscribe,
+      () => (store === null ? null : store.getSnapshot()),
+      () => null,
+    )
+    const selection = state?.current ?? state?.pending ?? null
+    if (typeof selection?.model === 'string') return selection.model
+    // The directory only reports a selection once the shared catalog has
+    // loaded; the Session's own durable projection answers before that.
+    return projectSessionModel(sessionId)
+  }
+
   /** Mounted composers, used by the shortcut to find the focused conversation. */
   const composers = new Map()
   let lastTouchedSession = null
@@ -204,7 +254,7 @@ export function createClientPlugin(require) {
    * service the scope never runs and the feature that needs it degrades to a
    * no-op.
    */
-  const services = { sessions: undefined, layout: undefined }
+  const services = { sessions: undefined, layout: undefined, modelDirectories: undefined }
 
   function errorText(t, error) {
     const code = error?.code
@@ -267,6 +317,19 @@ export function createClientPlugin(require) {
       h('path', { d: 'm4.5 4.5 7 7m0-7-7 7', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }))
   }
 
+  /** Small upward-trend mark for the peak-window notice. */
+  function PeakIcon() {
+    return h('svg', { viewBox: '0 0 16 16', width: 13, height: 13, 'aria-hidden': 'true', focusable: 'false' },
+      h('path', {
+        d: 'M2.4 11.6 6 7.6l2.6 2.2 3.9-5',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+      }),
+      h('path', {
+        d: 'M10.6 4.4h2.6v2.6',
+        fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round',
+      }))
+  }
+
   // ---------------------------------------------------------------- dialog
 
   /**
@@ -277,7 +340,7 @@ export function createClientPlugin(require) {
    *   keep the dialog open with an inline error).
    */
   function ScheduleDialog(props) {
-    const { t, zone, mode, initial, repeatLocked, previewText, attachmentCount, onSubmit, onClose } = props
+    const { t, zone, mode, initial, repeatLocked, previewText, attachmentCount, modelName, onSubmit, onClose } = props
     const locale = currentLocale()
     const titleId = useId()
     const panel = useRef(null)
@@ -293,6 +356,16 @@ export function createClientPlugin(require) {
     const tooSoon = resolved.ok !== true || resolved.instantMs < now + core.MIN_LEAD_MS
 
     const quickPicks = useMemo(() => listQuickPicks(t, zone, now), [t, zone, Math.floor(now / 60_000)])
+
+    /** Peak-price notice: DeepSeek models only, and only inside a peak window. */
+    const peak = useMemo(
+      () => core.deepSeekPeakNotice({
+        instantMs: resolved.ok === true ? resolved.instantMs : null,
+        modelName,
+        timeZone: zone,
+      }) ?? null,
+      [resolved, modelName, zone],
+    )
 
     useEffect(() => {
       restore.current = typeof document !== 'undefined' ? document.activeElement : null
@@ -436,6 +509,11 @@ export function createClientPlugin(require) {
           }, meridiem)))),
 
       h('p', { className: `dsm-summary${tooSoon ? ' dsm-summary-bad' : ''}`, role: 'status' }, summary),
+      peak === null
+        ? null
+        : h('p', { className: 'dsm-peak' },
+          h(PeakIcon),
+          h('span', null, t('dialog.peakHint', { windows: peak.windows }))),
 
       mode === 'create'
         ? h('div', { className: 'dsm-repeat' },
@@ -628,6 +706,7 @@ export function createClientPlugin(require) {
     const attachmentIds = Array.isArray(input?.attachmentIds) ? input.attachmentIds : []
     const phase = typeof input?.phase === 'string' ? input.phase : 'plain'
     const openSeq = useOpenRequest(sessionId)
+    const modelName = useSessionModelName(sessionId)
     const [open, setOpen] = useState(false)
     const zone = useMemo(currentZone, [])
 
@@ -677,6 +756,7 @@ export function createClientPlugin(require) {
           t,
           zone,
           mode: 'create',
+          modelName,
           initial: defaultSelection(zone),
           repeatLocked: attachmentIds.length > 0,
           previewText: draft,
@@ -699,6 +779,7 @@ export function createClientPlugin(require) {
     const refresh = useRefreshSignal()
     const zone = useMemo(currentZone, [])
     const locale = useMemo(currentLocale, [])
+    const modelName = useSessionModelName(sessionId)
     const [items, setItems] = useState([])
     const [failure, setFailure] = useState(null)
     const [expanded, setExpanded] = useState(false)
@@ -827,6 +908,7 @@ export function createClientPlugin(require) {
             : defaultSelection(zone),
           repeatLocked: true,
           previewText: '',
+          modelName,
           attachmentCount: 0,
           onClose: () => setEditing(null),
           onSubmit: async (plan) => {
@@ -949,6 +1031,13 @@ export function createClientPlugin(require) {
 .dsm-seg-on{border-color:${ORANGE};color:#fff;background:${ORANGE}}
 .dsm-summary{margin:0;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-secondary,#52525b)}
 .dsm-summary-bad{color:var(--dsw-alias-state-error-primary,#dc2626)}
+.dsm-peak{display:flex;align-items:flex-start;gap:6px;margin:0;padding:7px 9px;border-radius:8px;
+  font-size:12px;line-height:1.45;color:#C2410C;background:rgba(249,115,22,.10);
+  border:1px solid rgba(249,115,22,.32)}
+.dsm-peak svg{flex:none;margin-top:1px}
+@media (prefers-color-scheme:dark){
+.dsm-peak{color:#FDBA74;background:rgba(249,115,22,.16);border-color:rgba(253,186,116,.34)}
+}
 .dsm-repeat{display:flex;flex-direction:column;gap:8px;padding-top:4px;border-top:1px solid var(--dsw-alias-border-l1,#f0f0f1)}
 .dsm-check{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;min-height:32px}
 .dsm-check-off{opacity:.55;cursor:not-allowed}
@@ -1048,6 +1137,16 @@ export function createClientPlugin(require) {
       services.layout = scope.layout
       return () => {
         services.layout = undefined
+      }
+    })
+
+    // The composer's model seat and the /model popup share one directory; the
+    // dialog reads that same selection to know whether the DeepSeek price clock
+    // applies. A profile without it simply never shows the notice.
+    ctx.inject(['modelDirectories'], (scope) => {
+      services.modelDirectories = scope.modelDirectories
+      return () => {
+        services.modelDirectories = undefined
       }
     })
 

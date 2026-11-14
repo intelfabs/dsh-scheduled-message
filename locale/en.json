@@ -22,6 +22,7 @@
   "dialog.meridiem": "AM or PM",
   "dialog.summary": "Sends {time} ({zone})",
   "dialog.pastWarning": "That time has already passed, or is less than 30 seconds away.",
+  "dialog.peakHint": "DeepSeek's busy window is {windows} — a send there bills at 2× the off-peak rate. An evening or weekend slot is half price, so it's worth nudging this one later.",
   "dialog.repeat": "Repeat",
   "dialog.repeatHint": "Create an automation task that sends this text again on a rule.",
   "dialog.repeatLocked": "Repeating messages can't include images or files.",

@@ -22,6 +22,7 @@
   "dialog.meridiem": "上午或下午",
   "dialog.summary": "将于 {time}（{zone}）发送",
   "dialog.pastWarning": "这个时间已经过去，或距现在不足 30 秒。",
+  "dialog.peakHint": "DeepSeek 的高峰时段是 {windows}——此时段的价格是平时的 2 倍；挪到晚上或周末就是半价，晚一点发更划算。",
   "dialog.repeat": "重复",
   "dialog.repeatHint": "创建自动化任务，按规则重复发送这段文字。",
   "dialog.repeatLocked": "重复消息不能包含图片或文件。",

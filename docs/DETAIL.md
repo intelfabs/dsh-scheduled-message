@@ -257,6 +257,19 @@ overlays, so a portal is required, not cosmetic. It holds:
   shorter months are skipped;
 - footer with Cancel and the primary action, which becomes **Create automation** when Repeat is on.
 
+**Peak-price notice.** The dialog also reads the Session's model selection —
+`ctx.modelDirectories.directoryFor(sessionId).store`, the per-session directory the composer's model
+seat and the `/model` popup already share — and, when that model id contains `deepseek` *and* the
+chosen instant falls inside DeepSeek's published peak window, adds one orange line naming both
+windows in the reader's zone. The published rule (`api-docs.deepseek.com/quick_start/pricing`, read
+2026-11-14) is: off-peak rates are half the peak rates, peak hours are 01:00–04:00 and 06:00–10:00
+UTC Monday to Friday excluding Chinese public holidays, and every other hour is off-peak. The
+decision is `core.deepSeekPeakNotice` — model family, instant, zone in, notice or `null` out — so it
+is unit-tested without a browser; the seat only renders what it returns. Two honest limits: Chinese
+public holidays are not modelled (the copy speaks about the weekday clock rather than promising a
+price), and a scheduled message carries no model of its own, so the note reflects the model selected
+when the time was chosen.
+
 Escape, the backdrop and the header button close it; Tab is trapped; focus returns to whatever was
 focused before it opened. Submitting converts the selection with `core.wallClockToInstant` in the
 browser's zone and sends one absolute instant, so the Host never has to guess a zone.

@@ -18,8 +18,12 @@ import {
   MIN_LEAD_MS,
   RETENTION_MS,
   buildRrule,
+  deepSeekPeakNotice,
   describeDue,
+  describePeakWindows,
   earliestPending,
+  isDeepSeekModel,
+  isDeepSeekPeak,
   isLate,
   isValidTimeZone,
   localParts,
@@ -39,6 +43,48 @@ import {
 
 const HONG_KONG = 'Asia/Hong_Kong'
 const NEW_YORK = 'America/New_York'
+
+test('DeepSeek peak windows follow the published UTC weekday rule', () => {
+  // Monday 2026-11-16: 01:00-04:00 and 06:00-10:00 UTC are peak.
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 0, 30)), false)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 1, 0)), true)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 3, 59)), true)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 4, 0)), false)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 7, 30)), true)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 16, 10, 0)), false)
+  // Saturday and Sunday are off-peak all day.
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 21, 2, 0)), false)
+  assert.equal(isDeepSeekPeak(Date.UTC(2026, 10, 22, 7, 30)), false)
+  assert.equal(isDeepSeekPeak(null), false)
+})
+
+test('the peak notice only speaks for DeepSeek models', () => {
+  assert.equal(isDeepSeekModel('deepseek-v4.1-flash'), true)
+  assert.equal(isDeepSeekModel('DeepSeek-V4-Pro'), true)
+  assert.equal(isDeepSeekModel('claude-sonnet-4'), false)
+  assert.equal(isDeepSeekModel(''), false)
+  assert.equal(isDeepSeekModel(undefined), false)
+})
+
+test('the peak notice names both windows in the reader zone', () => {
+  const mondayPeak = Date.UTC(2026, 10, 16, 2, 0)
+  assert.deepEqual(
+    deepSeekPeakNotice({ instantMs: mondayPeak, modelName: 'deepseek-v4.1-flash', timeZone: HONG_KONG }),
+    { windows: '09:00–12:00 / 14:00–18:00' },
+  )
+  // A non-DeepSeek model, an off-peak instant and an unresolved time stay silent.
+  assert.equal(deepSeekPeakNotice({ instantMs: mondayPeak, modelName: 'claude-sonnet-4', timeZone: HONG_KONG }), null)
+  assert.equal(deepSeekPeakNotice({ instantMs: Date.UTC(2026, 10, 16, 12, 0), modelName: 'deepseek-v4.1-flash', timeZone: HONG_KONG }), null)
+  assert.equal(deepSeekPeakNotice({ instantMs: null, modelName: 'deepseek-v4.1-flash', timeZone: HONG_KONG }), null)
+  assert.equal(deepSeekPeakNotice({}), null)
+})
+
+test('peak windows render in the reader zone, crossing dates when needed', () => {
+  // 01:00-04:00 UTC is 20:00-23:00 the previous evening in New York in November.
+  assert.equal(describePeakWindows(Date.UTC(2026, 10, 16, 2, 0), NEW_YORK), '20:00–23:00 / 01:00–05:00')
+  // An unknown zone falls back to UTC instead of throwing.
+  assert.equal(describePeakWindows(Date.UTC(2026, 10, 16, 2, 0), 'Not/AZone'), '01:00–04:00 / 06:00–10:00')
+})
 
 test('the 12-hour clock keeps 12 AM at midnight and 12 PM at noon', () => {
   assert.deepEqual(toMeridiem(0), { hour12: 12, meridiem: 'AM' })

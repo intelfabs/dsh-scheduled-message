@@ -1,0 +1,34 @@
+name: publish
+
+# Publishing happens on GitHub, not on your machine: create a release and this
+# pushes the same commit to npm with a provenance attestation.
+#
+# One-time setup on npmjs.com, after the first manual `npm publish`:
+#   Package settings -> Trusted publishing -> GitHub Actions
+#     Organization or user: intelfabs
+#     Repository:          dsh-scheduled-message
+#     Workflow filename:   publish.yml
+#
+# No NPM_TOKEN secret is needed or wanted: the runner authenticates with a
+# short-lived OIDC token. Do not add `registry-url` to setup-node — the
+# `.npmrc` it writes injects an empty NODE_AUTH_TOKEN that breaks OIDC auth.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm test
+      - run: npm publish --access public --provenance

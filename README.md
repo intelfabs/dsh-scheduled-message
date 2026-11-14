@@ -24,18 +24,36 @@ their current meaning.
 
 ## Install
 
-The package is a normal DSH plugin bundle: a Host half (`index.js`), a browser half
-(`client.js`), and one patch entry.
+Published on npm as `dsh-scheduled-message`. The package is a normal DSH plugin bundle: a Host half
+(`index.js`), a browser half (`client.js`), and one patch entry.
 
 ```sh
-# 1. put the package where the profile can resolve it
-cp -r dsh-scheduled-message ~/.dsh/profiles/desktop/node_modules/dsh-scheduled-message
+dsh plugin --profile <profile> add dsh-scheduled-message
+```
 
-# 2. add it to the profile's dependencies and bundle list (package.json)
-#    "dsh-scheduled-message": "file:./node_modules/dsh-scheduled-message"
-#    "dsh": { "profile": { "bundles": [ …, "dsh-scheduled-message" ] } }
+Replace `<profile>` with the profile your host runs — `web` for a plain `dsh web`. DSH Desktop keeps
+its own profile, so install there from **Settings → Plugins** instead of the command line.
 
-# 3. restart DSH
+The command forwards to pnpm in the profile directory and, because the package declares `dsh.bundle`,
+adds it to `dsh.profile.bundles` as well. Then restart DSH.
+
+The market card does the same thing in one click: **Plugins** → **Discover**, search *scheduled
+message*.
+
+Needs DSH `0.2.2-rc.2` or newer (`engines.dsh`).
+
+### Without a package manager
+
+Put the folder where the profile can resolve it, list it in that profile's `package.json`, and
+restart:
+
+```sh
+cp -r dsh-scheduled-message ~/.dsh/profiles/<profile>/node_modules/dsh-scheduled-message
+```
+
+```jsonc
+"dependencies": { "dsh-scheduled-message": "file:./node_modules/dsh-scheduled-message" },
+"dsh": { "profile": { "bundles": [ …, "dsh-scheduled-message" ] } }
 ```
 
 With the plugin manager available, `install_bundle` with this directory as the target does the same

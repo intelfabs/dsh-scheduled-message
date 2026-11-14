@@ -17,3 +17,4 @@ Thumbs.db
 .idea/
 *.tgz
 .dsh-pdf-reader/
+.npm-cache/

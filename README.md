@@ -8,7 +8,7 @@ the next start and marked **sent late**.
 Normal sending is untouched: Enter, Shift+Enter, Ctrl/Cmd+Enter and the Send button keep exactly
 their current meaning.
 
-![wireframe](docs/preview.svg)
+![The Schedule message dialog: message preview, quick picks, date and 12-hour time, the "Sends …" summary and the Repeat row](docs/preview.png)
 
 ## What you get
 
@@ -107,6 +107,7 @@ the draft through the composer slot's standard `useInput` hook, so it enables as
 The plugin was also booted inside an isolated DSH `0.2.2-rc.2` web instance: it loaded, its client
 bundle was served into the page's boot graph, a real scheduled message was created, stored, delivered
 on time and, in a second cycle with the Host stopped past the due instant, delivered at startup and
-marked **sent late**; Repeat created a real Automation task. The browser UI itself — dialog rendering,
-Alt+Enter, the strip — has not been observed. See
+marked **sent late**; Repeat created a real Automation task. The dialog itself renders in a live composer —
+the screenshot above is the real thing, not a mock — while Alt+Enter and the strip have not been
+separately observed. See
 [`docs/DETAIL.md`](docs/DETAIL.md#7-verification) for the exact list.

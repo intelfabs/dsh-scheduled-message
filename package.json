@@ -1,0 +1,65 @@
+{
+  "name": "dsh-scheduled-message",
+  "version": "0.1.1",
+  "description": "Schedule the message you are writing to send later, or turn it into a repeating automation task.",
+  "license": "MIT",
+  "author": "intelfabs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intelfabs/dsh-scheduled-message.git"
+  },
+  "homepage": "https://github.com/intelfabs/dsh-scheduled-message#readme",
+  "bugs": {
+    "url": "https://github.com/intelfabs/dsh-scheduled-message/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "icon": "icon.svg",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "docs",
+    "scripts",
+    "cordis.patch.yml",
+    "icon.svg",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "cordis",
+    "schedule",
+    "scheduled-message"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.2"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/core.test.mjs test/client.test.mjs test/host.test.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

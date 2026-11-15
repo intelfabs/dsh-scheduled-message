@@ -1,6 +1,6 @@
 {
   "name": "dsh-scheduled-message",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Schedule the message you are writing to send later, or turn it into a repeating automation task.",
   "license": "MIT",
   "author": "intelfabs",

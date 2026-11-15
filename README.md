@@ -119,11 +119,13 @@ npm run check     # static gates
 
 ## Status
 
-`0.2.0`. 37 automated tests and the static gates pass. 0.2.0 adds the DeepSeek peak-price hint: when the
-session runs a DeepSeek model and the chosen time falls in its weekday peak window, the dialog adds one
-line naming the window in your own time zone; off-peak hours are half the rate. 0.1.1 fixed the composer
-button — it reads the draft through the composer slot's standard `useInput` hook, so it enables as soon
-as you type (0.1.0 read a `props.input` that `conversation.input.right` never passes and stayed disabled).
+`0.2.1`. 37 automated tests and the static gates pass. 0.2.1 is a packaging release: 0.2.0's tarball still
+carried this README's old `0.1.1` status line, so the npm listing now matches the repository exactly.
+0.2.0 added the DeepSeek peak-price hint — when the session runs a DeepSeek model and the chosen time
+falls in its weekday peak window, the dialog adds one line naming the window in your own time zone;
+off-peak hours are half the rate. 0.1.1 fixed the composer button: it reads the draft through the composer
+slot's standard `useInput` hook, so it enables as soon as you type (0.1.0 read a `props.input` that
+`conversation.input.right` never passes and stayed disabled).
 
 The plugin was also booted inside an isolated DSH `0.2.2-rc.2` web instance: it loaded, its client
 bundle was served into the page's boot graph, a real scheduled message was created, stored, delivered

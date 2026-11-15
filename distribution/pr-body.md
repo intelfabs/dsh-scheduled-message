@@ -13,7 +13,7 @@ Adds `intelfabs/dsh-scheduled-message` — a composer-side scheduler that sends 
 
 - `dsh.bundle.patch: ./cordis.patch.yml` in `package.json`, with the matching `cordis.patch.yml` at the repo root (`- insert: - id: dsh-scheduled-message`).
 - `dsh-plugin` topic set; the repo is public, not a fork, not archived.
-- Published on npm as `dsh-scheduled-message` **0.2.0**, so `dsh plugin add dsh-scheduled-message` resolves.
+- Published on npm as `dsh-scheduled-message` **0.2.1**, so `dsh plugin add dsh-scheduled-message` resolves.
 - Repo age: created 2026-11-14T01:05:42Z, so the one-day bar is now met; this push re-runs PR check and the Submission gate against it.
 
 **Category** — `workflow`: what the plugin changes is *when* a message is sent (durable host-side scheduling, plus an Automation task for repeats), not a new view or panel. Glad to have it re-filed by a maintainer if `ui` or `notify` fits better.

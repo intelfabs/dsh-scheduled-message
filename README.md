@@ -1,5 +1,7 @@
 # dsh-scheduled-message
 
+[![dsh.so install verification and risk scan](https://cdn.dsh.so/badge/dsh-scheduled-message.svg)](https://www.dsh.so/artifact/dsh-scheduled-message/?ref=badge)
+
 Schedule the message you are already writing in the DSH composer — text, images and files — to be
 delivered later by the **Host**. Because the timer and the store live in the Host, closing the tab or
 the window does not cancel anything, and a message whose time passed while DSH was closed is sent at
@@ -161,7 +163,7 @@ locale/en.json        English dictionary
 locale/zh.json        Chinese dictionary
 scripts/build-client.mjs   inlines lib/core.js + locale/*.json into client.js
 scripts/check.mjs     static gates (bundle freshness, locale coverage, exports, registrations)
-scripts/host-smoke.mjs     end-to-end Host test against in-memory services
+test/support/host-smoke.mjs     end-to-end Host test against in-memory services
 test/*.test.mjs       node --test suites
 docs/DETAIL.md        design notes, API evidence, and what is still unverified
 ```

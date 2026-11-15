@@ -287,7 +287,7 @@ Also confirm models in use accept PDFs as file parts; the plugin only passes fil
   `/upload` cap and orphan cleanup, delivery to `kind:'new'` incl. crash after session creation
   (no second session, no duplicate prompt).
 - `test/client.test.mjs`: grouping/ordering render, editor dirty state, conflict path.
-- `node scripts/check.mjs` and `node scripts/host-smoke.mjs` as in v1.
+- `node scripts/check.mjs` and `node test/support/host-smoke.mjs` as in v1.
 
 ## 9. Live checks (GUI)
 

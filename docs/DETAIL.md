@@ -351,7 +351,7 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
   registered button mounts with a fake input machine and is clickable exactly when `useInput`
   reports text or an attachment and the phase is `plain`; the bundle requires nothing outside the
   baseline table.
-- `test/host.test.mjs` → `scripts/host-smoke.mjs` — 66 assertions against in-memory services:
+- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 66 assertions against in-memory services:
   the six routes, six refusals that write nothing, a text create/list/deliver round trip with the
   derived request id and queued mode, a failed delivery plus retry with the same id, send-now,
   cancel and `not-pending`/`not-found`, reschedule and the 30 s guard, crash recovery from
@@ -367,7 +367,7 @@ files exist, and that `lib/core.js` stays dependency-free.
 ## 7. Verification
 
 In 0.3.0, `npm test` reports **79 tests passing** (59 core, 19 client, 1 Host wrapper that runs
-206 assertions), `npm run check` passes, and `node scripts/host-smoke.mjs` reports 206 assertions.
+206 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 206 assertions.
 The 0.2.x numbers were 32 tests: 26 core, 5 client, a 66-assertion Host wrapper.
 
 ### 7.1 Automated
@@ -454,7 +454,7 @@ observed (§7.3).
 | `dependencies: { zod: 4.6.6 }` | no dependency; the table's `valueSchema` is a plain `{ parse }` | The storage layer only calls `parse` (`dsh-storage-domain/src/index.ts:126`), and the package then installs with nothing to resolve. |
 | Button reads `useInput(s => s.draft)` | reads `props.useInput(state => state)` | 0.1.0 read `props.input`, which `conversation.input.right` never passes — its `renderSlot` owner is `{}` (`InputBar.tsx:541`) and only `conversation.input.dock` carries `InputZone`. That left the button permanently disabled; 0.1.1 restores the documented hook. |
 | Six routes with mixed HTTP status codes | all six answer `200` and carry `{ ok: false, error }` | Domain refusals are not transport failures, and the carrier owns `401`/`403`. |
-| `test/core.test.mjs` only | `core`, `client` and `host` suites plus `scripts/host-smoke.mjs` | The Host half had no execution coverage otherwise, and the generated bundle needed a freshness gate. |
+| `test/core.test.mjs` only | `core`, `client` and `host` suites plus `test/support/host-smoke.mjs` | The Host half had no execution coverage otherwise, and the generated bundle needed a freshness gate. |
 | `list` returns "pending + failed + sent in the last 24 h" | same, plus `sending` | A record mid-delivery should stay visible in the strip instead of vanishing for a moment. |
 | `version: 2` domain, migrated in place on open | `version: 2` **plus** `compatibleVersions: [1]` | The backend refuses a bare version mismatch, so a plain bump would have made the three stored v1 records unreadable. The unit is backed up under `.backup/` before the first v2 run. |
 | "Change workspace" = existing conversation only, if creation is unavailable | also `kind:'new'` (new conversation at send time) | `@Remote('create')` and `SessionCreateRequest.workspaceId` are both present in this build, so D1's preferred branch was buildable. |
@@ -550,7 +550,7 @@ one, and the repeated request id is refused by the Session inbox.
 ### 9.6 Verification status for v2
 
 All automated gates pass: 59 core tests, 19 client tests, the Host wrapper (206 assertions), the
-static gates in `scripts/check.mjs`, and `scripts/host-smoke.mjs` (206 assertions, including a v1
+static gates in `scripts/check.mjs`, and `test/support/host-smoke.mjs` (206 assertions, including a v1
 record opening under the v2 schema and a `kind:'new'` delivery that creates exactly one session).
 
 The tab was rendered in the live desktop GUI straight after the build: the sidebar entry, the page
@@ -571,7 +571,7 @@ against a real workspace list, and the phone layout (PLAN-v2.md §9).
 - `test/client.test.mjs` — bundle freshness, dictionary parity and key coverage, both panel
   registrations, icon/badge, grouping and headings, card model, destinations, `buildUpdate`, the
   workspace→filter resolution and its scope URLs, repeating-group visibility.
-- `test/host.test.mjs` + `scripts/host-smoke.mjs` — `/list-all` order and scope, `/get`, `/update`
+- `test/host.test.mjs` + `test/support/host-smoke.mjs` — `/list-all` order and scope, `/get`, `/update`
   happy path + `conflict` + `not-pending` + `unknown-file` + empty-after-removal, `/upload` staging and
   pruning, `/targets`, `/repeating` availability and filtering, `kind:'new'` delivery including the
   crash-after-creation cycle.

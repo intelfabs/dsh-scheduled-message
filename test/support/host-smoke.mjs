@@ -10,13 +10,13 @@
  * Every assertion is about observable behaviour of the shipped Host half: which
  * routes it owns, what it stores, when it delivers, and what it refuses.
  *
- * @module dsh-scheduled-message/scripts/host-smoke
+ * @module dsh-scheduled-message/test/support/host-smoke
  */
 
 import assert from 'node:assert/strict'
 import { register } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { createStorageDomainStub } from '../test/support/storage-domain-stub.mjs'
+import { createStorageDomainStub } from './storage-domain-stub.mjs'
 
 const PREFIX = '/api/dsh-scheduled-message'
 
@@ -58,8 +58,8 @@ let hostModule
  */
 async function loadHost() {
   if (hostModule === undefined) {
-    register(new URL('../test/support/stub-loader.mjs', import.meta.url).href)
-    hostModule = await import('../index.js')
+    register(new URL('./stub-loader.mjs', import.meta.url).href)
+    hostModule = await import('../../index.js')
   }
   return hostModule
 }

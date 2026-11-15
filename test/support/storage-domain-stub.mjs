@@ -12,6 +12,14 @@
 
 export function defineDomain(spec) {
   if (typeof spec?.name !== 'string' || spec.name.length === 0) throw new Error('domain name is required')
+  if (!Number.isInteger(spec.version) || spec.version < 0) {
+    throw new Error('domain version must be a non-negative integer')
+  }
+  for (const compatible of spec.compatibleVersions ?? []) {
+    if (!Number.isInteger(compatible) || compatible < 0 || compatible >= spec.version) {
+      throw new Error('compatibleVersions entries must be non-negative integers below version ' + spec.version)
+    }
+  }
   return spec
 }
 
@@ -80,6 +88,15 @@ export function createStorageDomainStub(log) {
             /** Test-only: read the raw stored object. */
             raw(key) {
               return map.get(key)
+            },
+            /**
+             * Test-only: store a record exactly as an older version wrote it.
+             * The real store reads those bytes from disk before `parse` runs.
+             * @param key - record key.
+             * @param value - raw stored object, not parsed.
+             */
+            putRaw(key, value) {
+              map.set(key, value)
             },
           }
         },

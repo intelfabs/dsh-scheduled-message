@@ -12,6 +12,7 @@ a remembered API. File and line references point at the shipped package sources 
 - [6. Tests](#6-tests)
 - [7. Verification](#7-verification)
 - [8. Deviations from PLAN.md](#8-deviations-from-planmd)
+- [9. The Scheduled tab (v2, 0.3.0)](#9-v2)
 
 ---
 
@@ -275,8 +276,9 @@ focused before it opened. Submitting converts the selection with `core.wallClock
 browser's zone and sends one absolute instant, so the Host never has to guess a zone.
 
 Success clears the draft and its attachments with `inputActions.setDraft('')` /
-`removeAttachment(id)`, shows a notice, refreshes the strip, and for Repeat opens the Automation task
-page. Failure keeps the draft, keeps the dialog open and shows the reason inline.
+`removeAttachment(id)`, shows a self-clearing flash in this conversation's strip, refreshes the list, and
+for Repeat opens the Automation task page. No session notice is pushed: a notice handed to the platform
+cannot be retracted, so it stayed on screen after the record it described was deleted (§7.3). Failure keeps the draft, keeps the dialog open and shows the reason inline.
 
 ### 4.3 Shortcut
 
@@ -364,8 +366,9 @@ files exist, and that `lib/core.js` stays dependency-free.
 <a id="7-verification"></a>
 ## 7. Verification
 
-`npm test` reports **32 tests passing** (26 core, 5 client, 1 Host wrapper that runs 66 assertions),
-and `npm run check` passes.
+In 0.3.0, `npm test` reports **79 tests passing** (59 core, 19 client, 1 Host wrapper that runs
+206 assertions), `npm run check` passes, and `node scripts/host-smoke.mjs` reports 206 assertions.
+The 0.2.x numbers were 32 tests: 26 core, 5 client, a 66-assertion Host wrapper.
 
 ### 7.1 Automated
 
@@ -434,8 +437,10 @@ observed (§7.3).
 2. **Alt+Enter has not been pressed in a real editor**, and the strip has not been seen expanded.
    Their registrations are asserted structurally, and the shortcut's `resolve()` paths are unit
    tested, but no real keystroke was delivered.
-3. **The notice path** (`conversation.input.for(scope).notify(...)`) and
-   `layout.selectPanel('schedules')` were never observed: both run only from browser interactions.
+3. **The session-notice path** (`conversation.input.for(scope).notify(...)`) was never observed, and is no
+   longer used: a pushed notice is not something the plugin can retract, and the composer kept saying
+   "Scheduled for …" after that record had been deleted. The strip and its scoped flash carry the message
+   instead. `layout.selectPanel('schedules')` still runs only from browser interactions.
 4. **A message with images or files has not been delivered by a real Host.** The re-read, re-upload
    and re-stage paths are covered by the smoke test's stand-ins only.
 5. **A physical phone** was never used.
@@ -451,3 +456,122 @@ observed (§7.3).
 | Six routes with mixed HTTP status codes | all six answer `200` and carry `{ ok: false, error }` | Domain refusals are not transport failures, and the carrier owns `401`/`403`. |
 | `test/core.test.mjs` only | `core`, `client` and `host` suites plus `scripts/host-smoke.mjs` | The Host half had no execution coverage otherwise, and the generated bundle needed a freshness gate. |
 | `list` returns "pending + failed + sent in the last 24 h" | same, plus `sending` | A record mid-delivery should stay visible in the strip instead of vanishing for a moment. |
+| `version: 2` domain, migrated in place on open | `version: 2` **plus** `compatibleVersions: [1]` | The backend refuses a bare version mismatch, so a plain bump would have made the three stored v1 records unreadable. The unit is backed up under `.backup/` before the first v2 run. |
+| "Change workspace" = existing conversation only, if creation is unavailable | also `kind:'new'` (new conversation at send time) | `@Remote('create')` and `SessionCreateRequest.workspaceId` are both present in this build, so D1's preferred branch was buildable. |
+| A `/targets` route serving its own workspace data | `/targets` exists, but a conversation title is reported only when the build exposes one | `SessionSummary` carries no title and the title plugin is optional; short ids are shown instead of invented names. |
+| Editor uploads "files" through `/upload` | images still travel as base64 in `/update`; only non-image files stream through `/upload` | The image limits, the 40 px thumbnail path and the v1 dialog all speak base64 images; mixing both would have doubled that code. |
+| Repeating rows listed with a count | listed read-only when `ctx.schedule.list()` reports session targets, hidden when the service is absent | The plugin never stored the task ids v1 created, so claiming ownership would be a lie; `/repeating` reports what the service says. |
+| Success "shows a notice" (§4.2) | a scoped, self-clearing flash in the strip, no session notice | A notice pushed into the composer cannot be retracted, so it outlived the record it described. |
+<a id="9-v2"></a>
+## 9. The Scheduled tab (v2, 0.3.0)
+
+v1 schedules *this* composer's message. v2 adds one place to see and edit **every** scheduled
+message: a **Scheduled** sidebar tab over all conversations, a full editor (time, text, images,
+files, destination), moves between conversations, delivery into a conversation that does not exist
+yet, and read-only repeating rows that point at Automation tasks.
+
+### 9.1 Platform facts checked for v2
+
+| Fact | Evidence in the shipped build |
+|---|---|
+| A sidebar tab is two registrations sharing one id: keyed `main` + `sidebar.panellist` (id, order, label) | `dsh-client-ui-schedule/src/client/index.ts:218-246`; order 10 is Automation tasks, so this plugin takes 11 |
+| `ctx.layout.selectPanel(id)` selects a registered `main` key and throws for an absent one | `dsh-client-ui-layout/README.md:36,63` |
+| A plugin may create an ordinary conversation on the Host | `dsh-api-session-controller/src/index.ts:306-309` (`@Remote('create')`), request `types.ts:268-277` (`workspaceId?` exclusive with `cwd?`, `sessionId?`, `agentPreset?`), value `:280-285` |
+| Verbatim file storage with no admission cap | `dsh-attachment/src/index.ts:231`; the local provider implements it at `dsh-attachment-local/src/index.ts:240-241`; "Files carry no admission limits: any byte content and length is accepted" at `dsh-attachment/src/index.ts:208-212`; input type `types.ts:64-71` |
+| Attachment refs are durable and session-free | `dsh-attachment/src/types.ts:11-32` (image: id, mediaType, bytes, width, height, name) and `:39-46` (file: id = sha256 of the exact bytes, name, bytes) |
+| A domain may bump its version **and** still open older stored records | `dsh-storage-domain/src/spec.ts:49-56` (`compatibleVersions`), validated `:111-117`, forwarded to the unit descriptor `:157-161`; the backend rejects a bare version mismatch at `index.ts:85-93`, so `version: 2` alone would have stranded the v1 file |
+| Session summaries carry **no title** | `dsh-api-session-controller/src/types.ts:154-167`; the only title producer is the optional `dsh-session-title-all-prompts-llm` plugin (`dsh-experimental-session-titles-bundle/cordis.patch.yml`) |
+| Workspaces and their sessions | `dsh-workspace/src/index.ts:308` (`list()`), `types.ts:69-99` (`id`, `path`, `title`, ordered `sessionIds`), `:360` (`archivedSessionIds`) |
+
+### 9.2 Record v2 and the upgrade
+
+```ts
+interface ScheduledMessageRecordV2 {
+  id: string
+  target: { kind: 'session'; sessionId: string } | { kind: 'new'; cwd: string; workspaceId?: string; title?: string }
+  sessionId?: string   // the created conversation for kind 'new', written before the prompt
+  dueAt: string; timeZone: string; text: string
+  images: ImageAttachmentRef[]; files: FileAttachmentRef[]
+  createdAt: string; updatedAt: string
+  status: 'pending' | 'sending' | 'sent' | 'failed' | 'cancelled'
+  sentAt?: string; late?: boolean; error?: string
+}
+```
+
+- The domain is `version: 2` with `compatibleVersions: [1]`; `parseRecord` migrates a v1 record
+  (`sessionId` only) to `target: {kind:'session'}` on the way in, so nothing is rewritten on disk and
+  an older build still reads the file.
+- `updatedAt` is the optimistic-concurrency token and strictly increases on every write
+  (`nextUpdatedAt`), so two tabs cannot silently overwrite each other: the second save gets `conflict`.
+- **Backup before the first v2 run.** The live unit was `~/.dsh/storages/dsh_scheduled_message.json`
+  with descriptor `{"name":"dsh_scheduled_message","version":1}` and three settled v1 records
+  (2096 bytes). It was copied — not moved — to `.backup/dsh_scheduled_message-v1-20261115-124303.json`
+  before the new bundle was installed.
+
+### 9.3 Routes
+
+Thirteen, all under `/api/dsh-scheduled-message`, owner-only, all answering HTTP 200 with
+`{ok:true,value}` or `{ok:false,error:{code,message}}` (only `/thumb` answers a real 404, because the
+browser loads it as an image).
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/create`, `/list`, `/cancel`, `/reschedule`, `/send-now`, `/retry` | as v1 | the composer strip is unchanged; `/list` now selects by the *resolved* session, so a moved record leaves the old strip |
+| `/list-all` | GET | every message the tab shows, `scope=all\|workspace&workspaceId=`; day grouping stays in the browser |
+| `/get` | GET | one record for the editor, whatever its status |
+| `/update` | POST | merge time/text/target/attachments under `expectedUpdatedAt`; `conflict`, `not-pending`, `empty`, `unknown-file` |
+| `/upload` | POST | raw body → `ctx.attachments.saveFileStream` → `{fileId,name,bytes}`, staged 24 h / 200 files |
+| `/thumb` | GET | one stored image's bytes, `cache-control: private, max-age=3600` |
+| `/targets` | GET | workspaces with their non-archived conversations, newest first |
+| `/repeating` | GET | session-targeted Automation tasks, read-only; `available:false` when the service is absent |
+
+### 9.4 Delivery into a new conversation
+
+`kind:'new'` calls `ctx.sessionController.create({workspaceId})` (or `{cwd}` when only a directory is
+known), **persists the new `sessionId` and a fresh `updatedAt` before prompting**, and then delivers
+with the same `requestId: 'dsm-' + id`. A crash between creating and prompting therefore leaves a
+record that already names its conversation: the next attempt reuses it instead of opening a second
+one, and the repeated request id is refused by the Session inbox.
+
+### 9.5 Known limits
+
+1. **Conversation names.** `SessionSummary` has no title, so `/targets` and `targetLabel` show a short
+   session id unless a title projection is actually present. The tab never invents a name.
+2. **"This workspace".** The control appears only when a conversation open in this page maps to a
+   workspace through `/targets`; without that mapping the tab stays on All.
+3. **Removing an attachment** drops the stored reference; the bytes follow DSH's own retention — this
+   build has no attachment delete API.
+4. **Repeating rows** are what `ctx.schedule.list()` reports for session targets. The plugin does not
+   claim ownership (it does not remember the task ids v1 created), lists at most 50, and derives
+   `enabled` from the task's `status`.
+5. **Images in the editor** travel as base64 through `/update` under the provider's image limits; only
+   non-image files use `/upload`.
+
+### 9.6 Verification status for v2
+
+All automated gates pass: 59 core tests, 19 client tests, the Host wrapper (206 assertions), the
+static gates in `scripts/check.mjs`, and `scripts/host-smoke.mjs` (206 assertions, including a v1
+record opening under the v2 schema and a `kind:'new'` delivery that creates exactly one session).
+
+The tab was rendered in the live desktop GUI straight after the build: the sidebar entry, the page
+and its day groups appeared. Opening a message then blanked the panel, and the cause was the
+editor's first paint: with no record loaded yet there is no instant, and `describeDue` fell through
+to `new Date(NaN).toISOString()`, which throws `RangeError: Invalid time value` inside a render and
+takes the whole panel down. 0.3.1 fixes it at both levels — `describeDue` answers an empty string
+for a non-finite instant (the fallback now has its own `try`), the editor formats a summary only
+when it has one, and `test/client.test.mjs` renders the editor's first paint so it cannot come
+back. A human look is still owed for the sheet/dialog/bottom-sheet layouts, the destination picker
+against a real workspace list, and the phone layout (PLAN-v2.md §9).
+
+### 9.7 Tests added for v2
+
+- `test/core.test.mjs` — migration v1→v2 and its idempotence, `parseRecord` rejections, monotonic
+  `updatedAt`, both target kinds, every validation code, `nothing-to-update`, day labels across a
+  midnight boundary and a DST transition, group ordering, the 24 h sent window, pending counts.
+- `test/client.test.mjs` — bundle freshness, dictionary parity and key coverage, both panel
+  registrations, icon/badge, grouping and headings, card model, destinations, `buildUpdate`, the
+  workspace→filter resolution and its scope URLs, repeating-group visibility.
+- `test/host.test.mjs` + `scripts/host-smoke.mjs` — `/list-all` order and scope, `/get`, `/update`
+  happy path + `conflict` + `not-pending` + `unknown-file` + empty-after-removal, `/upload` staging and
+  pruning, `/targets`, `/repeating` availability and filtering, `kind:'new'` delivery including the
+  crash-after-creation cycle.

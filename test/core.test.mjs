@@ -9,34 +9,55 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  COMPATIBLE_VERSIONS,
   DOMAIN_NAME,
+  DOMAIN_VERSION,
   LATE_THRESHOLD_MS,
+  MAX_ERROR_CHARS,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGES,
+  MAX_MESSAGE_IMAGE_BYTES,
   MAX_PENDING,
   MAX_TEXT_CHARS,
   MAX_TIMER_DELAY_MS,
   MAX_TITLE_CHARS,
   MIN_LEAD_MS,
+  RECORD_STATUSES,
   RETENTION_MS,
+  SENT_WINDOW_MS,
   buildRrule,
+  countPending,
+  dayLabel,
   deepSeekPeakNotice,
   describeDue,
   describePeakWindows,
   earliestPending,
+  estimateBase64Bytes,
+  groupRecords,
   isDeepSeekModel,
   isDeepSeekPeak,
   isLate,
   isValidTimeZone,
   localParts,
+  migrateRecord,
+  nextUpdatedAt,
   pad2,
   parseLocalDate,
+  parseRecord,
   pendingSummary,
   pruneTargets,
+  resolveSessionId,
   skipsShortMonths,
+  sortPendingRecords,
   summariseTitle,
   timerDelay,
   to24Hour,
   toMeridiem,
   validateCreateRequest,
+  validateMerged,
+  validateMessageContent,
+  validateTarget,
+  validateUpdateRequest,
   wallClockToInstant,
   zoneOffsetMs,
 } from '../lib/core.js'
@@ -397,4 +418,518 @@ test('due instants format through Intl without throwing', () => {
   const text = describeDue(instant, 'en-GB', HONG_KONG)
   assert.ok(text.includes('9:00'), `expected a 12-hour or 24-hour time, got ${text}`)
   assert.ok(describeDue(instant, 'not a locale', HONG_KONG).length > 0)
+})
+
+// ---------------------------------------------------------------- schema v2
+
+const UTC_ZERO_PAD = '2026-11-15T00:00:00.000Z'
+
+const V1_RECORD = {
+  id: 'msg-1',
+  sessionId: 'session-a',
+  dueAt: '2026-11-16T01:00:00.000Z',
+  timeZone: HONG_KONG,
+  text: 'hello',
+  images: [{ attachmentId: 'img-1', mediaType: 'image/png', name: 'a.png' }],
+  files: [],
+  createdAt: UTC_ZERO_PAD,
+  updatedAt: UTC_ZERO_PAD,
+  status: 'pending',
+}
+
+const V2_NEW = {
+  id: 'msg-2',
+  target: { kind: 'new', cwd: '/work/ws', workspaceId: 'ws-1', title: 'Later' },
+  dueAt: '2026-11-16T02:00:00.000Z',
+  timeZone: HONG_KONG,
+  text: 'later',
+  images: [],
+  files: [{ attachmentId: 'file-1', name: 'spec.pdf', bytes: 2048 }],
+  createdAt: UTC_ZERO_PAD,
+  updatedAt: UTC_ZERO_PAD,
+  status: 'pending',
+}
+
+const IMAGE = { mediaType: 'image/png', data: 'AAAA' }
+
+function hongKongAt(date, hour24, minute) {
+  const resolved = wallClockToInstant({ date, hour24, minute }, HONG_KONG)
+  assert.equal(resolved.ok, true, 'Hong Kong has no gap at ' + date + ' ' + hour24 + ':' + minute)
+  return resolved.instantMs
+}
+
+function newYorkAt(date, hour24, minute) {
+  const resolved = wallClockToInstant({ date, hour24, minute }, NEW_YORK)
+  assert.equal(resolved.ok, true, 'New York has a wall clock at ' + date + ' ' + hour24 + ':' + minute)
+  return resolved.instantMs
+}
+
+test('the domain is version 2 and still opens version 1', () => {
+  assert.equal(DOMAIN_VERSION, 2)
+  assert.deepEqual([...COMPATIBLE_VERSIONS], [1])
+  assert.deepEqual([...RECORD_STATUSES], ['pending', 'sending', 'sent', 'failed', 'cancelled'])
+  assert.equal(MAX_ERROR_CHARS, 500)
+  assert.ok(MAX_IMAGE_BYTES > 0 && MAX_MESSAGE_IMAGE_BYTES > MAX_IMAGE_BYTES)
+  assert.equal(SENT_WINDOW_MS, 24 * 60 * 60 * 1000)
+})
+
+test('a v1 record migrates to a session target', () => {
+  const migrated = migrateRecord(V1_RECORD)
+  assert.deepEqual(migrated.target, { kind: 'session', sessionId: 'session-a' })
+  assert.equal(migrated.sessionId, 'session-a')
+  assert.equal(migrated.id, 'msg-1')
+  assert.equal(migrated.status, 'pending')
+  assert.equal(migrated.text, 'hello')
+  assert.deepEqual(migrated.images, V1_RECORD.images)
+  assert.equal('sentAt' in migrated, false)
+  assert.equal('error' in migrated, false)
+  assert.equal(migrateRecord(null), null)
+  assert.equal(migrateRecord('nope'), null)
+  assert.equal(migrateRecord([]), null)
+})
+
+test('migration is idempotent and leaves a v2 record alone', () => {
+  const once = migrateRecord(V1_RECORD)
+  assert.deepEqual(migrateRecord(once), once)
+  assert.deepEqual(migrateRecord(migrateRecord(V1_RECORD)), once)
+  assert.deepEqual(migrateRecord(V2_NEW), V2_NEW)
+  assert.deepEqual(migrateRecord(migrateRecord(V2_NEW)), V2_NEW)
+})
+
+test('migration defaults absent fields instead of throwing', () => {
+  const bare = migrateRecord({ sessionId: 's1' })
+  assert.deepEqual(bare.target, { kind: 'session', sessionId: 's1' })
+  assert.equal(bare.timeZone, 'UTC')
+  assert.deepEqual(bare.images, [])
+  assert.deepEqual(bare.files, [])
+  assert.equal(bare.text, '')
+  assert.equal(bare.status, 'pending')
+  assert.equal(migrateRecord({ ...V1_RECORD, sessionId: '' }).target, undefined)
+  assert.equal(migrateRecord({ ...V1_RECORD, timeZone: '' }).timeZone, 'UTC')
+})
+
+test('parseRecord accepts a v1 record and normalizes it to v2', () => {
+  const parsed = parseRecord(V1_RECORD)
+  assert.deepEqual(parsed.target, { kind: 'session', sessionId: 'session-a' })
+  assert.equal(parsed.sessionId, 'session-a')
+  assert.equal(parsed.status, 'pending')
+  assert.equal(parsed.timeZone, HONG_KONG)
+  assert.deepEqual(parsed.files, [])
+  assert.equal('sentAt' in parsed, false)
+})
+
+test('parseRecord accepts both v2 target kinds', () => {
+  const fresh = parseRecord(V2_NEW)
+  assert.deepEqual(fresh.target, V2_NEW.target)
+  assert.equal(fresh.sessionId, undefined)
+  assert.deepEqual(fresh.files, V2_NEW.files)
+
+  const created = parseRecord({ ...V2_NEW, sessionId: 'session-created' })
+  assert.equal(created.sessionId, 'session-created')
+
+  const moved = parseRecord({
+    ...V2_NEW,
+    target: { kind: 'session', sessionId: 'session-b' },
+    sessionId: 'session-created',
+  })
+  assert.deepEqual(moved.target, { kind: 'session', sessionId: 'session-b' })
+  assert.equal(moved.sessionId, 'session-b', 'a session target owns the resolved id')
+})
+
+test('parseRecord keeps a fallback zone and boolean flags', () => {
+  const parsed = parseRecord({ ...V1_RECORD, timeZone: 'Mars/Olympus', late: 1, status: 'sent', sentAt: UTC_ZERO_PAD })
+  assert.equal(parsed.timeZone, 'UTC')
+  assert.equal(parsed.late, true)
+  assert.equal(parsed.sentAt, UTC_ZERO_PAD)
+})
+
+test('parseRecord refuses a bad status, instant or attachment', () => {
+  assert.throws(() => parseRecord({ ...V1_RECORD, status: 'exploded' }), /unknown status exploded/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, dueAt: 'tomorrow' }), /dueAt/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, createdAt: '' }), /createdAt/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, updatedAt: 'soon' }), /updatedAt/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, id: '' }), /id/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, images: [{ mediaType: 'image/png' }] }), /attachmentId/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, images: [{ attachmentId: '' }] }), /attachmentId/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, files: 'nope' }), /files/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, target: { kind: 'automation' } }), /target/)
+  assert.throws(() => parseRecord({ ...V1_RECORD, sessionId: '', target: undefined }), /target/)
+  assert.throws(() => parseRecord(null), /object/)
+  assert.throws(() => parseRecord([]), /object/)
+})
+
+test('a stored error is clamped and kept only when present', () => {
+  const clamped = parseRecord({ ...V1_RECORD, status: 'failed', error: 'x'.repeat(4000) }, { maxErrorChars: 12 })
+  assert.equal(clamped.error.length, 12)
+  assert.equal(parseRecord({ ...V1_RECORD, status: 'failed', error: 'boom' }).error, 'boom')
+  assert.equal('error' in parseRecord(V1_RECORD), false)
+  assert.equal(parseRecord({ ...V1_RECORD, status: 'failed', error: 'x'.repeat(4000) }).error.length, MAX_ERROR_CHARS)
+})
+
+test('updatedAt strictly increases even when the clock stands still', () => {
+  const previous = UTC_ZERO_PAD
+  const previousMs = Date.parse(previous)
+  assert.equal(nextUpdatedAt(previous, previousMs - 60_000), new Date(previousMs + 1).toISOString())
+  assert.equal(nextUpdatedAt(previous, previousMs), new Date(previousMs + 1).toISOString())
+  assert.equal(nextUpdatedAt(previous, previousMs + 60_000), new Date(previousMs + 60_000).toISOString())
+  assert.equal(nextUpdatedAt(undefined, previousMs), new Date(previousMs).toISOString())
+  let token = previous
+  for (let round = 0; round < 5; round += 1) {
+    const next = nextUpdatedAt(token, Date.parse(token))
+    assert.ok(Date.parse(next) > Date.parse(token), 'round ' + round + ' must advance')
+    token = next
+  }
+})
+
+test('validateTarget accepts both kinds', () => {
+  assert.deepEqual(
+    validateTarget({ kind: 'session', sessionId: 's1', extra: true }),
+    { ok: true, value: { kind: 'session', sessionId: 's1' } },
+  )
+  assert.deepEqual(validateTarget({ kind: 'new', cwd: '/work/ws' }), { ok: true, value: { kind: 'new', cwd: '/work/ws' } })
+  assert.deepEqual(
+    validateTarget({ kind: 'new', cwd: 'C:\\work\\ws', workspaceId: 'w1', title: 'Later' }),
+    { ok: true, value: { kind: 'new', cwd: 'C:\\work\\ws', workspaceId: 'w1', title: 'Later' } },
+  )
+  assert.equal(validateTarget({ kind: 'new', cwd: '\\\\server\\share' }).ok, true)
+})
+
+test('validateTarget rejects anything else with one stable code', () => {
+  const cases = [
+    null,
+    'session-a',
+    { kind: 'session', sessionId: '' },
+    { kind: 'session' },
+    { kind: 'new' },
+    { kind: 'new', cwd: 'relative/path' },
+    { kind: 'new', cwd: '' },
+    { kind: 'new', cwd: '/work/ws', workspaceId: '' },
+    { kind: 'new', cwd: '/work/ws', title: 7 },
+    { kind: 'automation', taskId: 't1' },
+  ]
+  for (const candidate of cases) {
+    const result = validateTarget(candidate)
+    assert.equal(result.ok, false, String(JSON.stringify(candidate)))
+    assert.equal(result.code, 'invalid-target')
+    assert.ok(result.message.length > 0)
+  }
+})
+
+test('validateMessageContent enforces every limit', () => {
+  assert.equal(validateMessageContent({ text: '  hi  ' }).ok, true)
+  assert.equal(validateMessageContent({ text: '   ' }).code, 'empty')
+  assert.equal(validateMessageContent({}).code, 'empty')
+  assert.equal(validateMessageContent(undefined).code, 'empty')
+  assert.equal(validateMessageContent({ text: '', images: [IMAGE] }).ok, true)
+  assert.equal(validateMessageContent({ text: '', files: [{ attachmentId: 'f1', name: 'a.pdf', bytes: 10 }] }).ok, true)
+  assert.equal(validateMessageContent({ text: 'x'.repeat(MAX_TEXT_CHARS + 1) }).code, 'text-too-long')
+  assert.equal(validateMessageContent({ text: 'x'.repeat(MAX_TEXT_CHARS) }).ok, true)
+  assert.equal(validateMessageContent({ text: 42 }).code, 'invalid-text')
+  assert.equal(validateMessageContent({ images: 'nope' }).code, 'invalid-images')
+  assert.equal(validateMessageContent({ images: [{}] }).code, 'invalid-images')
+  assert.equal(validateMessageContent({ images: [{ mediaType: 'image/png', data: '' }] }).code, 'invalid-images')
+  assert.equal(validateMessageContent({ images: [{ mediaType: '', data: 'AAAA' }] }).code, 'invalid-images')
+  assert.equal(
+    validateMessageContent({ images: Array.from({ length: MAX_IMAGES + 1 }, () => IMAGE) }).code,
+    'too-many-images',
+  )
+  assert.equal(validateMessageContent({ images: [IMAGE, IMAGE], limits: { maxImagesPerMessage: 1 } }).code, 'too-many-images')
+  assert.equal(validateMessageContent({ images: [IMAGE], limits: { maxImageBytes: 2 } }).code, 'image-too-large')
+  assert.equal(validateMessageContent({ images: [IMAGE], limits: { maxImageBytes: 3 } }).ok, true)
+  assert.equal(
+    validateMessageContent({ images: [IMAGE, IMAGE], limits: { maxMessageImageBytes: 5 } }).code,
+    'images-too-large',
+  )
+  assert.equal(validateMessageContent({ files: [{ name: 'a.pdf' }] }).code, 'invalid-files')
+  assert.equal(validateMessageContent({ files: [{ attachmentId: '' }] }).code, 'invalid-files')
+  assert.equal(validateMessageContent({ files: [{ attachmentId: 'f', bytes: -1 }] }).code, 'invalid-files')
+  assert.equal(validateMessageContent({ files: 'nope' }).code, 'invalid-files')
+  assert.equal(
+    validateMessageContent({ files: [{ attachmentId: 'f', bytes: 10 }], limits: { maxFilesBytes: 5 } }).code,
+    'files-too-large',
+  )
+  assert.equal(validateMessageContent({ text: 'x', limits: { maxTextChars: 0 } }).ok, true)
+})
+
+test('validateMessageContent reports the normalized content and sizes', () => {
+  const result = validateMessageContent({
+    text: 'hi',
+    images: [{ mediaType: 'image/png', data: 'AAAA', name: 'a.png' }],
+    files: [{ attachmentId: 'f1', name: 'a.pdf', bytes: 10 }],
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.value.text, 'hi')
+  assert.deepEqual(result.value.images, [{ mediaType: 'image/png', data: 'AAAA', name: 'a.png' }])
+  assert.equal(result.value.textChars, 2)
+  assert.equal(result.value.imageBytes, 3)
+  assert.equal(result.value.fileBytes, 10)
+})
+
+test('the base64 byte estimate subtracts padding', () => {
+  assert.equal(estimateBase64Bytes('AAAA'), 3)
+  assert.equal(estimateBase64Bytes('AAA='), 2)
+  assert.equal(estimateBase64Bytes('AA=='), 1)
+  assert.equal(estimateBase64Bytes(''), 0)
+  assert.equal(estimateBase64Bytes(undefined), 0)
+  assert.equal(estimateBase64Bytes('AA AA'), 3)
+})
+
+function updateBase(overrides = {}) {
+  return { id: 'msg-1', expectedUpdatedAt: UTC_ZERO_PAD, ...overrides }
+}
+
+const UPDATE_NOW = Date.parse(UTC_ZERO_PAD)
+
+test('validateUpdateRequest accepts each change field', () => {
+  const dueAt = new Date(UPDATE_NOW + 10 * 60_000).toISOString()
+  assert.equal(validateUpdateRequest(updateBase({ dueAt }), UPDATE_NOW).value.dueAt, dueAt)
+  assert.equal(validateUpdateRequest(updateBase({ dueAt }), UPDATE_NOW).value.dueMs, Date.parse(dueAt))
+  assert.equal(validateUpdateRequest(updateBase({ text: ' new text ' }), UPDATE_NOW).value.text, 'new text')
+  assert.deepEqual(
+    validateUpdateRequest(updateBase({ target: { kind: 'new', cwd: '/work/ws', workspaceId: 'w1' } }), UPDATE_NOW).value.target,
+    { kind: 'new', cwd: '/work/ws', workspaceId: 'w1' },
+  )
+  assert.equal(validateUpdateRequest(updateBase({ addImages: [IMAGE] }), UPDATE_NOW).value.addImages.length, 1)
+  assert.deepEqual(validateUpdateRequest(updateBase({ addFileIds: ['f1', 'f1', 'f2'] }), UPDATE_NOW).value.addFileIds, ['f1', 'f2'])
+  assert.deepEqual(
+    validateUpdateRequest(updateBase({ removeAttachmentIds: ['a1', 'a1'] }), UPDATE_NOW).value.removeAttachmentIds,
+    ['a1'],
+  )
+  assert.equal(validateUpdateRequest(updateBase({ text: '' }), UPDATE_NOW).ok, true, 'an empty text is judged after the merge')
+})
+
+test('validateUpdateRequest combines every field in one request', () => {
+  const dueAt = new Date(UPDATE_NOW + 10 * 60_000).toISOString()
+  const result = validateUpdateRequest(updateBase({
+    dueAt,
+    text: 'edited',
+    target: { kind: 'session', sessionId: 'session-b' },
+    addImages: [IMAGE],
+    addFileIds: ['f1'],
+    removeAttachmentIds: ['a1'],
+  }), UPDATE_NOW)
+  assert.equal(result.ok, true)
+  assert.equal(result.value.id, 'msg-1')
+  assert.equal(result.value.expectedUpdatedAt, UTC_ZERO_PAD)
+  assert.equal(result.value.dueAt, dueAt)
+  assert.equal(result.value.text, 'edited')
+  assert.deepEqual(result.value.target, { kind: 'session', sessionId: 'session-b' })
+  assert.deepEqual(result.value.addImages, [IMAGE])
+  assert.deepEqual(result.value.addFileIds, ['f1'])
+  assert.deepEqual(result.value.removeAttachmentIds, ['a1'])
+})
+
+test('validateUpdateRequest refuses an empty or malformed request', () => {
+  assert.equal(validateUpdateRequest(null, UPDATE_NOW).code, 'invalid-request')
+  assert.equal(validateUpdateRequest(updateBase({ id: '' }), UPDATE_NOW).code, 'invalid-id')
+  assert.equal(validateUpdateRequest({ id: 'msg-1' }, UPDATE_NOW).code, 'invalid-expected-updated-at')
+  assert.equal(validateUpdateRequest(updateBase({ expectedUpdatedAt: 'yesterday' }), UPDATE_NOW).code, 'invalid-expected-updated-at')
+  assert.equal(validateUpdateRequest(updateBase(), UPDATE_NOW).code, 'nothing-to-update')
+  assert.equal(
+    validateUpdateRequest(updateBase({ addImages: [], addFileIds: [], removeAttachmentIds: [] }), UPDATE_NOW).code,
+    'nothing-to-update',
+    'empty change lists are not changes',
+  )
+})
+
+test('validateUpdateRequest refuses a time that is too soon or not an instant', () => {
+  assert.equal(validateUpdateRequest(updateBase({ dueAt: 'tomorrow' }), UPDATE_NOW).code, 'invalid-due-at')
+  assert.equal(validateUpdateRequest(updateBase({ dueAt: new Date(UPDATE_NOW).toISOString() }), UPDATE_NOW).code, 'too-soon')
+  assert.equal(
+    validateUpdateRequest(updateBase({ dueAt: new Date(UPDATE_NOW + MIN_LEAD_MS - 1).toISOString() }), UPDATE_NOW).code,
+    'too-soon',
+  )
+  assert.equal(
+    validateUpdateRequest(updateBase({ dueAt: new Date(UPDATE_NOW + MIN_LEAD_MS).toISOString() }), UPDATE_NOW).ok,
+    true,
+  )
+})
+
+test('validateUpdateRequest refuses a bad target and bad content', () => {
+  assert.equal(validateUpdateRequest(updateBase({ target: { kind: 'automation' } }), UPDATE_NOW).code, 'invalid-target')
+  assert.equal(validateUpdateRequest(updateBase({ target: { kind: 'new', cwd: 'relative' } }), UPDATE_NOW).code, 'invalid-target')
+  assert.equal(validateUpdateRequest(updateBase({ text: 7 }), UPDATE_NOW).code, 'invalid-text')
+  assert.equal(
+    validateUpdateRequest(updateBase({ text: 'x'.repeat(MAX_TEXT_CHARS + 1) }), UPDATE_NOW).code,
+    'text-too-long',
+  )
+  assert.equal(
+    validateUpdateRequest(updateBase({ addImages: Array.from({ length: MAX_IMAGES + 1 }, () => IMAGE) }), UPDATE_NOW).code,
+    'too-many-images',
+  )
+  assert.equal(validateUpdateRequest(updateBase({ addImages: 'nope' }), UPDATE_NOW).code, 'invalid-images')
+  assert.equal(validateUpdateRequest(updateBase({ addFileIds: [''] }), UPDATE_NOW).code, 'invalid-files')
+  assert.equal(validateUpdateRequest(updateBase({ removeAttachmentIds: [7] }), UPDATE_NOW).code, 'invalid-attachment-ids')
+})
+
+test('a removal plus empty text is refused by the merged check', () => {
+  const update = validateUpdateRequest(updateBase({ text: '   ', removeAttachmentIds: ['img-1'] }), UPDATE_NOW)
+  assert.equal(update.ok, true, 'the update itself is legal; only the merged record can be judged')
+  const merged = validateMerged({ ...V1_RECORD, text: update.value.text, images: [], files: [] })
+  assert.equal(merged.ok, false)
+  assert.equal(merged.code, 'empty')
+  assert.equal(validateMerged({ ...V1_RECORD, text: '' }).ok, true, 'the kept image still makes a message')
+  assert.equal(validateMerged({ ...V1_RECORD, text: 'kept' }).ok, true)
+})
+
+test('dayLabel names today, tomorrow and the next few days', () => {
+  const now = hongKongAt('2026-11-15', 9, 0)
+  assert.deepEqual(dayLabel(hongKongAt('2026-11-15', 23, 0), now, HONG_KONG), {
+    kind: 'today', date: '2026-11-15', isoWeekday: 7,
+  })
+  assert.deepEqual(dayLabel(hongKongAt('2026-11-16', 0, 5), now, HONG_KONG), {
+    kind: 'tomorrow', date: '2026-11-16', isoWeekday: 1,
+  })
+  assert.deepEqual(dayLabel(hongKongAt('2026-11-18', 12, 0), now, HONG_KONG), {
+    kind: 'weekday', date: '2026-11-18', isoWeekday: 3,
+  })
+  assert.equal(dayLabel(hongKongAt('2026-11-21', 12, 0), now, HONG_KONG).kind, 'weekday', 'six days out keeps a weekday name')
+  assert.equal(dayLabel(hongKongAt('2026-11-22', 12, 0), now, HONG_KONG).kind, 'date', 'a week out gets the full date')
+  assert.equal(dayLabel(hongKongAt('2026-11-14', 12, 0), now, HONG_KONG).kind, 'date', 'a past day gets the full date')
+})
+
+test('dayLabel crosses midnight on the calendar, not on elapsed time', () => {
+  const lateNight = hongKongAt('2026-11-15', 23, 59)
+  const justAfter = hongKongAt('2026-11-16', 0, 1)
+  assert.ok(justAfter - lateNight <= 3 * 60_000)
+  assert.equal(dayLabel(justAfter, lateNight, HONG_KONG).kind, 'tomorrow')
+  const backwards = dayLabel(lateNight, justAfter, HONG_KONG)
+  assert.equal(backwards.kind, 'date')
+  assert.equal(backwards.date, '2026-11-15')
+  assert.equal(
+    zoneOffsetMs(lateNight, HONG_KONG),
+    zoneOffsetMs(justAfter + 30 * 86_400_000, HONG_KONG),
+    'Hong Kong keeps one offset all year',
+  )
+})
+
+test('dayLabel follows the calendar across a New York DST change', () => {
+  const early = newYorkAt('2026-03-08', 0, 10)
+  const late = newYorkAt('2026-03-08', 23, 10)
+  assert.ok(late - early < 24 * 3_600_000, 'the spring-forward day is 23 hours long')
+  assert.equal(dayLabel(late, early, NEW_YORK).kind, 'today')
+  assert.equal(dayLabel(late, early, NEW_YORK).date, '2026-03-08')
+
+  const beforeMidnight = newYorkAt('2026-03-08', 23, 55)
+  const afterMidnight = newYorkAt('2026-03-09', 0, 5)
+  assert.ok(afterMidnight - beforeMidnight < 3_600_000)
+  assert.equal(dayLabel(afterMidnight, beforeMidnight, NEW_YORK).kind, 'tomorrow')
+  assert.equal(dayLabel(afterMidnight, beforeMidnight, NEW_YORK).date, '2026-03-09')
+
+  assert.equal(
+    dayLabel(newYorkAt('2026-03-15', 12, 0), newYorkAt('2026-03-08', 12, 0), NEW_YORK).kind,
+    'date',
+    'a week later is not a weekday label',
+  )
+  assert.equal(dayLabel(newYorkAt('2026-03-09', 12, 0), newYorkAt('2026-03-08', 12, 0), NEW_YORK).kind, 'tomorrow')
+})
+
+test('dayLabel falls back to UTC and refuses a broken instant', () => {
+  const now = Date.UTC(2026, 10, 15, 0, 0)
+  assert.equal(dayLabel(Date.UTC(2026, 10, 16, 0, 0), now, 'Not/AZone').kind, 'tomorrow')
+  assert.throws(() => dayLabel(Number.NaN, now, HONG_KONG), RangeError)
+  assert.throws(() => dayLabel(now, Number.NaN, HONG_KONG), RangeError)
+})
+
+test('pending rows sort by due time, then created time, then id', () => {
+  const rows = [
+    { id: 'b', dueAt: '2026-11-15T02:00:00.000Z', createdAt: UTC_ZERO_PAD },
+    { id: 'a', dueAt: '2026-11-15T01:00:00.000Z', createdAt: UTC_ZERO_PAD },
+    { id: 'c', dueAt: '2026-11-15T01:00:00.000Z', createdAt: UTC_ZERO_PAD },
+    { id: 'early', dueAt: '2026-11-15T01:00:00.000Z', createdAt: '2026-11-13T00:00:00.000Z' },
+    { id: 'broken', dueAt: 'whenever', createdAt: UTC_ZERO_PAD },
+  ]
+  assert.deepEqual(sortPendingRecords(rows).map((row) => row.id), ['early', 'a', 'c', 'b', 'broken'])
+  assert.deepEqual(sortPendingRecords([]), [])
+  assert.deepEqual(sortPendingRecords(undefined), [])
+  assert.equal(rows[0].id, 'b', 'the input array is not reordered')
+})
+
+test('groupRecords orders day groups and appends the sent window', () => {
+  const now = hongKongAt('2026-11-15', 9, 0)
+  const iso = (ms) => new Date(ms).toISOString()
+  const records = [
+    {
+      id: 'sent-old', status: 'sent',
+      dueAt: iso(now - 3 * SENT_WINDOW_MS), sentAt: iso(now - 3 * SENT_WINDOW_MS), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'tomorrow-late', status: 'pending',
+      dueAt: iso(hongKongAt('2026-11-16', 21, 0)), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'today-b', status: 'pending',
+      dueAt: iso(hongKongAt('2026-11-15', 20, 0)), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'failed', status: 'failed',
+      dueAt: iso(hongKongAt('2026-11-15', 8, 0)), createdAt: UTC_ZERO_PAD, error: 'blocked',
+    },
+    {
+      id: 'today-a', status: 'sending',
+      dueAt: iso(hongKongAt('2026-11-15', 10, 0)), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'tomorrow-early', status: 'pending',
+      dueAt: iso(hongKongAt('2026-11-16', 9, 0)), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'sent-recent', status: 'sent',
+      dueAt: iso(now - 120_000), sentAt: iso(now - 60_000), createdAt: UTC_ZERO_PAD,
+    },
+    {
+      id: 'cancelled-recent', status: 'cancelled',
+      dueAt: iso(now - 300_000), sentAt: iso(now - 120_000), createdAt: UTC_ZERO_PAD,
+    },
+    { id: 'broken', status: 'pending', dueAt: 'whenever', createdAt: UTC_ZERO_PAD },
+  ]
+  const groups = groupRecords(records, now, HONG_KONG)
+  assert.deepEqual(groups.map((group) => group.kind), ['today', 'tomorrow', 'sent'])
+  assert.deepEqual(groups.map((group) => group.date), ['2026-11-15', '2026-11-16', null])
+  assert.deepEqual(groups[0].rows.map((row) => row.id), ['failed', 'today-a', 'today-b'])
+  assert.deepEqual(groups[1].rows.map((row) => row.id), ['tomorrow-early', 'tomorrow-late'])
+  assert.deepEqual(groups[2].rows.map((row) => row.id), ['sent-recent', 'cancelled-recent'])
+  assert.equal(
+    groups.flatMap((group) => group.rows).some((row) => row.id === 'sent-old'),
+    false,
+    'a settled record older than the window is not listed',
+  )
+  assert.equal(groups.flatMap((group) => group.rows).some((row) => row.id === 'broken'), false)
+  assert.deepEqual(groupRecords([], now, HONG_KONG), [])
+  assert.deepEqual(groupRecords(undefined, now, HONG_KONG), [])
+})
+
+test('countPending counts what still has to be sent', () => {
+  assert.equal(countPending([
+    { status: 'pending' },
+    { status: 'sending' },
+    { status: 'sent' },
+    { status: 'failed' },
+    { status: 'cancelled' },
+    null,
+  ]), 2)
+  assert.equal(countPending([]), 0)
+  assert.equal(countPending(undefined), 0)
+})
+
+test('the resolved session id follows a moved record', () => {
+  assert.equal(resolveSessionId({ target: { kind: 'session', sessionId: 's1' } }), 's1')
+  assert.equal(resolveSessionId({ target: { kind: 'new', cwd: '/work/ws' } }), undefined)
+  assert.equal(resolveSessionId({ target: { kind: 'new', cwd: '/work/ws' }, sessionId: 'created' }), 'created')
+  assert.equal(resolveSessionId({}), undefined)
+  assert.equal(resolveSessionId(null), undefined)
+  assert.equal(resolveSessionId(parseRecord(V1_RECORD)), 'session-a')
+  assert.equal(resolveSessionId(parseRecord(V2_NEW)), undefined)
+  assert.equal(resolveSessionId(parseRecord({ ...V2_NEW, sessionId: 'session-created' })), 'session-created')
+})
+
+test('describeDue returns an empty string instead of throwing without an instant', () => {
+  // A view that is still loading has no instant yet. The old fallback called
+  // toISOString() on an invalid Date, which throws RangeError('Invalid time value')
+  // and took the whole panel down with it.
+  assert.equal(describeDue(Number.NaN, 'en', 'Asia/Hong_Kong'), '')
+  assert.equal(describeDue(undefined, 'en', 'Asia/Hong_Kong'), '')
+  assert.equal(describeDue(Number.POSITIVE_INFINITY, 'en', 'Asia/Hong_Kong'), '')
+  assert.equal(describeDue('not a date', 'en', 'Asia/Hong_Kong'), '')
+  assert.ok(describeDue(Date.parse('2026-11-15T13:00:00.000Z'), 'en', 'Asia/Hong_Kong').length > 0)
 })

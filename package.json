@@ -1,7 +1,7 @@
 {
   "name": "dsh-scheduled-message",
-  "version": "0.2.1",
-  "description": "Schedule the message you are writing to send later, or turn it into a repeating automation task.",
+  "version": "0.3.1",
+  "description": "Schedule the message you are writing, manage every scheduled message from one sidebar tab, or turn it into a repeating automation task.",
   "license": "MIT",
   "author": "intelfabs",
   "repository": {
@@ -50,7 +50,7 @@
   },
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "node --test test/core.test.mjs test/client.test.mjs test/host.test.mjs",
+    "test": "node test/core.test.mjs && node test/client.test.mjs && node test/host.test.mjs",
     "check": "node scripts/check.mjs"
   },
   "dsh": {

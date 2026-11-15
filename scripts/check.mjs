@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 import { buildClient } from './build-client.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -29,13 +30,57 @@ const expected = buildClient()
 const actual = readFileSync(join(ROOT, 'client.js'), 'utf8')
 requireThat(actual === expected, 'client.js is stale: run `node scripts/build-client.mjs`')
 
+/**
+ * Remove module syntax so a file can be compiled as a classic script.
+ *
+ * Only used when this sandbox refuses to spawn a second Node process for the
+ * authoritative `node --check` gate; it strips import declarations (including
+ * multi-line ones) and export keywords, which is enough to surface a syntax
+ * error in the code itself.
+ * @param source - module source text.
+ * @returns script source text.
+ */
+function stripModuleSyntax(source) {
+  return source
+    .replace(/^import[\s\S]*?from\s*(['"])[^'"\n]*\1[ \t]*;?[ \t]*$/gm, '')
+    .replace(/^import\s*(['"])[^'"\n]*\1[ \t]*;?[ \t]*$/gm, '')
+    .replace(/^export\s*\{[\s\S]*?\}[ \t]*;?[ \t]*$/gm, '')
+    .replace(/^export\s+(?:default\s+)?/gm, '')
+}
+
+/**
+ * Report the first syntax error in one package file.
+ *
+ * `node --check` is the real gate. Where the sandbox refuses to spawn Node
+ * (EPERM/EACCES/ENOENT), the same source is compiled in-process instead of
+ * failing the check for an environment reason.
+ * @param file - package-relative path.
+ * @returns the first error line, or null when the file parses.
+ */
+function parseFailure(file) {
+  const path = join(ROOT, file)
+  const source = readFileSync(path, 'utf8')
+  try {
+    execFileSync(process.execPath, ['--check', path], { stdio: 'pipe' })
+    return null
+  } catch (error) {
+    const code = typeof error?.code === 'string' ? error.code : ''
+    if (code !== 'EPERM' && code !== 'EACCES' && code !== 'ENOENT') {
+      return String(error.stderr ?? error.message).split('\n')[0]
+    }
+  }
+  try {
+    new vm.Script(stripModuleSyntax(source), { filename: path })
+    return null
+  } catch (error) {
+    return String(error.message).split('\n')[0]
+  }
+}
+
 // 2. Both halves and the tests must parse.
 for (const file of ['index.js', 'lib/core.js', 'client.js', 'client.src.js']) {
-  try {
-    execFileSync(process.execPath, ['--check', join(ROOT, file)], { stdio: 'pipe' })
-  } catch (error) {
-    failures.push(`${file} does not parse: ${String(error.stderr ?? error.message).split('\n')[0]}`)
-  }
+  const failure = parseFailure(file)
+  if (failure !== null) failures.push(`${file} does not parse: ${failure}`)
 }
 
 // 3. package.json and both dictionaries must parse and agree on their keys.
@@ -89,6 +134,19 @@ for (const file of readdirSync(join(ROOT, 'lib')).filter(name => name.endsWith('
   const source = readFileSync(join(ROOT, 'lib', file), 'utf8')
   requireThat(!/^import\s/m.test(source), `lib/${file} must stay dependency-free`)
 }
+
+// 8. The Scheduled tab is two registrations sharing one id, and the browser
+// half never polls: refresh is event- and timer-driven only.
+const clientSource = readFileSync(join(ROOT, 'client.src.js'), 'utf8')
+requireThat(
+  /name: 'main',\s*\n\s*key: PANEL_ID/.test(clientSource),
+  "client.src.js must register the 'main' page under PANEL_ID",
+)
+requireThat(
+  /name: 'sidebar\.panellist',\s*\n\s*id: PANEL_ID,\s*\n\s*order: 11/.test(clientSource),
+  'client.src.js must register the sidebar entry under PANEL_ID at order 11',
+)
+requireThat(!/setInterval\s*\(/.test(clientSource), 'client.src.js must not poll with setInterval')
 
 if (failures.length > 0) {
   process.stderr.write(`check failed:\n${failures.map(line => `  - ${line}`).join('\n')}\n`)

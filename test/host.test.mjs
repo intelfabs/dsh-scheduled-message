@@ -1,29 +1,20 @@
 /**
- * Run the Host smoke test in a child process that can remap one package.
+ * Host test: run the whole Host scenario in process under node:test.
  *
- * The remap has to be installed before `index.js` is imported, which is a
- * process-level decision, so the test shells out instead of importing the Host
- * half itself.
+ * The storage-domain remap has to be installed before index.js is imported,
+ * which is a process-level decision, so scripts/host-smoke.mjs registers it and
+ * imports the Host half itself; this file only wraps that scenario so the
+ * summary is printed by the TAP reporter instead of a child process.
  *
  * @module dsh-scheduled-message/test/host.test
  */
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runHostSmoke } from '../scripts/host-smoke.mjs'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const ROOT = dirname(HERE)
-
-test('the Host half delivers, refuses and recovers as documented', () => {
-  const result = spawnSync(process.execPath, [
-    '--import', pathToFileURL(join(HERE, 'support/register.mjs')).href,
-    join(ROOT, 'scripts/host-smoke.mjs'),
-  ], { cwd: ROOT, encoding: 'utf8' })
-
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
-  assert.equal(result.status, 0, `host smoke failed:\n${output.slice(-4000)}`)
-  assert.match(output, /host smoke: \d+ assertions passed/)
+test('the Host half delivers, refuses and recovers as documented', async () => {
+  const result = await runHostSmoke()
+  assert.ok(result.assertions > 0, 'the scenario ran at least one assertion')
+  process.stdout.write('host test: ' + result.assertions + ' assertions passed\n')
 })

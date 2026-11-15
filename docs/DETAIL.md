@@ -333,9 +333,9 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
 <a id="6-tests"></a>
 ## 6. Tests
 
-`npm test` (33 tests):
+`npm test` (37 tests):
 
-- `test/core.test.mjs` — 26 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
+- `test/core.test.mjs` — 30 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
   (09:00 in `Asia/Hong_Kong` → `01:00Z`), a round-trip across five zones and three dates, a DST gap
   refused, an ambiguous hour resolved, every validator rejection (past, <30 s, empty, >10 images,
   repeat with attachments, oversized text, bad zone, bad instant), RRULE text for all four

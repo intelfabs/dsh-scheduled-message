@@ -3,8 +3,8 @@ node_modules/
 pnpm-lock.yaml
 package-lock.json
 
-# Local development plan — contains machine-specific paths; not part of the published package
-PLAN.md
+# Local development plans — handoff notes with machine-specific paths; never shipped or published
+PLAN*.md
 
 # Logs and OS noise
 *.log

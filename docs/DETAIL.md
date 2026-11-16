@@ -595,7 +595,7 @@ takes the whole panel down. 0.3.1 fixes it at both levels — `describeDue` answ
 for a non-finite instant (the fallback now has its own `try`), the editor formats a summary only
 when it has one, and `test/client.test.mjs` renders the editor's first paint so it cannot come
 back. A human look is still owed for the sheet/dialog/bottom-sheet layouts, the destination picker
-against a real workspace list, and the phone layout (PLAN-v2.md §9).
+against a real workspace list, and the phone layout on a real device.
 
 ### 9.7 Tests added for v2
 

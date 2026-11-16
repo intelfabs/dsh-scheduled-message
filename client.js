@@ -396,11 +396,28 @@ function validateCreateRequest(payload, nowMs) {
     return fail('repeat-with-new-conversation', 'A repeating message needs an existing conversation.')
   }
 
+  // A staged file receipt is memory-only and belongs to the conversation that
+  // uploaded it. A session target is that conversation, so its receipts resolve
+  // against its own agent. A new-conversation target opens a different
+  // conversation at delivery, so it must name the uploader explicitly; the
+  // Host resolves the receipt now and stores only the durable attachment ref.
+  const hasSourceSessionId = payload.sourceSessionId !== undefined
+  if (hasSourceSessionId && target.value.kind !== 'new') {
+    return fail('invalid-request', 'sourceSessionId is only for a new-conversation target.')
+  }
+  if (hasSourceSessionId && (typeof payload.sourceSessionId !== 'string' || payload.sourceSessionId.length === 0)) {
+    return fail('invalid-request', 'sourceSessionId must be a non-empty conversation id.')
+  }
+  if (target.value.kind === 'new' && fileReceipts.length > 0 && !hasSourceSessionId) {
+    return fail('invalid-request', 'A new conversation with attached files needs the conversation that uploaded them.')
+  }
+
   return {
     ok: true,
     value: {
       target: target.value,
       ...(target.value.kind === 'session' ? { sessionId: target.value.sessionId } : {}),
+      ...(target.value.kind === 'new' && hasSourceSessionId ? { sourceSessionId: payload.sourceSessionId } : {}),
       dueAt: new Date(dueMs).toISOString(),
       dueMs,
       timeZone,
@@ -1294,7 +1311,6 @@ const EN = {
   "dialog.noText": "Only attachments",
   "dialog.destination": "Send to",
   "dialog.thisConversation": "This conversation",
-  "dialog.newWithAttachments": "A new conversation can't take attached files — images are fine. Pick This conversation to send a file.",
   "dialog.newUnavailable": "This conversation's workspace could not be found, so a new conversation cannot be created from here.",
   "dialog.conflictHint": "Another message is already scheduled for this conversation around this time, so this one may wait for the earlier turn to finish.",
   "repeat.daily": "Daily",
@@ -1349,7 +1365,6 @@ const EN = {
   "error.attachmentsUnavailable": "This conversation cannot hand over its attachments.",
   "error.uploading": "Wait for uploads to finish, then try again.",
   "error.unknownWorkspace": "The workspace this message was addressed to no longer exists.",
-  "error.attachmentsNeedConversation": "A new conversation can't take attached files; send this message to this conversation instead.",
   "error.repeatWithNewConversation": "A repeating message needs an existing conversation.",
   "panel.label": "Scheduled",
   "panel.title": "Scheduled",
@@ -1458,7 +1473,6 @@ const ZH = {
   "dialog.noText": "仅附件",
   "dialog.destination": "发送到",
   "dialog.thisConversation": "当前会话",
-  "dialog.newWithAttachments": "新会话不能携带附件文件（图片可以）。要发文件请选“当前会话”。",
   "dialog.newUnavailable": "找不到此会话所属的工作区，因此无法从这里创建新会话。",
   "dialog.conflictHint": "这个时间前后已经有一条消息发往同一会话，这条可能要等前一轮结束才会送达。",
   "repeat.daily": "每天",
@@ -1513,7 +1527,6 @@ const ZH = {
   "error.attachmentsUnavailable": "此会话无法交出草稿附件。",
   "error.uploading": "请等附件上传完成后再试。",
   "error.unknownWorkspace": "这条消息指向的工作区已不存在。",
-  "error.attachmentsNeedConversation": "新会话不能携带附件文件，请把这条消息发到当前会话。",
   "error.repeatWithNewConversation": "重复消息需要一个已存在的会话。",
   "panel.label": "定时消息",
   "panel.title": "定时消息",
@@ -1644,7 +1657,6 @@ function createClientPlugin(require) {
     'not-found': 'error.notFound',
     'too-many-pending': 'error.tooManyPending',
     'unknown-workspace': 'error.unknownWorkspace',
-    'attachments-need-conversation': 'error.attachmentsNeedConversation',
     'repeat-with-new-conversation': 'error.repeatWithNewConversation',
     'invalid-images': 'error.invalidImages',
     'invalid-request': 'error.generic',
@@ -2902,9 +2914,6 @@ function createClientPlugin(require) {
               disabled: busy,
               onClick: () => setPicked('session'),
             }, t('dialog.thisConversation'))),
-          choice === 'new' && attachmentCount > 0
-            ? h('p', { className: 'dsm-hint dsm-hint-warn' }, t('dialog.newWithAttachments'))
-            : null,
           destination.unavailable === true
             ? h('p', { className: 'dsm-hint' }, t('dialog.newUnavailable'))
             : null),
@@ -2996,6 +3005,27 @@ function createClientPlugin(require) {
   // ---------------------------------------------------------------- create plumbing
 
   /**
+   * Decide which destination fields one create request carries.
+   *
+   * A session form is byte-identical to 0.3.x: exactly `{ sessionId }`. A target
+   * travels alone, except that a new conversation carrying staged files also
+   * names the conversation that uploaded them (`sourceSessionId`): the receipt
+   * is memory-only and belongs to this conversation, so the Host can resolve it
+   * only now. Images need no such id because they travel as base64, so an
+   * image-only draft keeps the same request it always sent.
+   * @param target - the dialog's chosen target, or null for this conversation.
+   * @param sessionId - the conversation the composer shows.
+   * @param fileCount - how many staged files the draft serialized.
+   * @returns the destination fields spread into the create body.
+   */
+  function createDestination(target, sessionId, fileCount) {
+    if (target === null || target === undefined) return { sessionId }
+    if (target.kind === 'session' && target.sessionId === sessionId) return { sessionId }
+    if (target.kind === 'new' && fileCount > 0) return { target, sourceSessionId: sessionId }
+    return { target }
+  }
+
+  /**
    * Turn the current composer draft into a create request and send it.
    *
    * Attachment ids are serialized by the concrete conversation service, so an
@@ -3033,10 +3063,7 @@ function createClientPlugin(require) {
     // The default destination keeps the v1 request byte-identical: `sessionId`
     // names this conversation, exactly as a 0.3.x client sends it. Any other
     // destination travels as `target`, and the two never travel together.
-    const target = plan?.target ?? null
-    const addressed = target !== null && !(target.kind === 'session' && target.sessionId === sessionId)
-      ? { target }
-      : { sessionId }
+    const addressed = createDestination(plan?.target ?? null, sessionId, fileReceipts.length)
     const value = await postJson(API + '/create', {
       ...addressed,
       dueAt: new Date(plan.instantMs).toISOString(),
@@ -4910,6 +4937,7 @@ function createClientPlugin(require) {
       draftOf,
       draftPayload,
       pendingAttachments,
+      createDestination,
       filterTargets,
       sortSessions,
       destinationOf,

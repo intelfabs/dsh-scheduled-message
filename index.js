@@ -85,7 +85,6 @@ const CODES = {
   emptyBody: 'empty-body',
   bodyTooLarge: 'body-too-large',
   tooManyPending: 'too-many-pending',
-  attachmentsNeedConversation: 'attachments-need-conversation',
   internal: 'internal',
 }
 
@@ -776,7 +775,9 @@ async function missingWorkspace(scheduler, target) {
  * A session target resolves its agent now, because the conversation exists. A
  * new-conversation target does not: creating it here would leave an empty
  * conversation behind every cancelled message, so the workspace is only checked
- * and the conversation is opened at delivery time.
+ * and the conversation is opened at delivery time. When it carries staged
+ * files, the conversation that uploaded them is resolved instead, because a
+ * receipt is memory-only and cannot be read back at delivery.
  * @param scheduler - owning store.
  * @param body - untrusted JSON body.
  */
@@ -787,6 +788,9 @@ async function handleCreate(scheduler, body) {
   const target = request.target
 
   let agent
+  // A new-conversation target resolves the conversation that uploaded its file
+  // receipts into its own variable, so the session path's agent is untouched.
+  let sourceAgent
   if (target.kind === 'session') {
     try {
       const resolved = await scheduler.ctx.sessionController.resolveAgent(request.sessionId)
@@ -805,11 +809,21 @@ async function handleCreate(scheduler, body) {
     // delivery failure left to rot until the due instant.
     const missing = await missingWorkspace(scheduler, target)
     if (missing !== null) return jsonError(CODES.unknownWorkspace, missing)
-    // A staged receipt belongs to the conversation that uploaded it, which is not
-    // the conversation this message will open.
+    // A staged receipt belongs to the conversation that uploaded it, not to the
+    // conversation this message will open. It is resolved here, while it is
+    // still in memory, and only the durable ref is stored; delivery re-uploads
+    // that ref into the conversation it opens.
     if (request.fileReceipts.length > 0) {
-      return jsonError(CODES.attachmentsNeedConversation,
-        'Attached files need an existing conversation; send this message to this conversation instead.')
+      try {
+        const resolved = await scheduler.ctx.sessionController.resolveAgent(request.sourceSessionId)
+        if (resolved === null || typeof resolved !== 'object' || 'error' in resolved
+          || resolved.agent === undefined) {
+          return jsonError(CODES.unknownSession, 'That conversation is no longer available; reopen it and try again.')
+        }
+        sourceAgent = resolved.agent
+      } catch (error) {
+        return jsonError(CODES.unknownSession, describeError(error))
+      }
     }
   }
 
@@ -854,8 +868,9 @@ async function handleCreate(scheduler, body) {
   }
 
   const files = []
+  const receiptAgent = target.kind === 'session' ? agent : sourceAgent
   for (const receiptId of request.fileReceipts) {
-    const staged = scheduler.ctx.fileUploads.resolve(agent, receiptId)
+    const staged = scheduler.ctx.fileUploads.resolve(receiptAgent, receiptId)
     if (staged === undefined || staged.type !== 'file') {
       return jsonError(CODES.unknownReceipt, 'One of the attached files is no longer available; attach it again.')
     }

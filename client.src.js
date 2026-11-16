@@ -53,7 +53,6 @@ export function createClientPlugin(require) {
     'not-found': 'error.notFound',
     'too-many-pending': 'error.tooManyPending',
     'unknown-workspace': 'error.unknownWorkspace',
-    'attachments-need-conversation': 'error.attachmentsNeedConversation',
     'repeat-with-new-conversation': 'error.repeatWithNewConversation',
     'invalid-images': 'error.invalidImages',
     'invalid-request': 'error.generic',
@@ -1311,9 +1310,6 @@ export function createClientPlugin(require) {
               disabled: busy,
               onClick: () => setPicked('session'),
             }, t('dialog.thisConversation'))),
-          choice === 'new' && attachmentCount > 0
-            ? h('p', { className: 'dsm-hint dsm-hint-warn' }, t('dialog.newWithAttachments'))
-            : null,
           destination.unavailable === true
             ? h('p', { className: 'dsm-hint' }, t('dialog.newUnavailable'))
             : null),
@@ -1405,6 +1401,27 @@ export function createClientPlugin(require) {
   // ---------------------------------------------------------------- create plumbing
 
   /**
+   * Decide which destination fields one create request carries.
+   *
+   * A session form is byte-identical to 0.3.x: exactly `{ sessionId }`. A target
+   * travels alone, except that a new conversation carrying staged files also
+   * names the conversation that uploaded them (`sourceSessionId`): the receipt
+   * is memory-only and belongs to this conversation, so the Host can resolve it
+   * only now. Images need no such id because they travel as base64, so an
+   * image-only draft keeps the same request it always sent.
+   * @param target - the dialog's chosen target, or null for this conversation.
+   * @param sessionId - the conversation the composer shows.
+   * @param fileCount - how many staged files the draft serialized.
+   * @returns the destination fields spread into the create body.
+   */
+  function createDestination(target, sessionId, fileCount) {
+    if (target === null || target === undefined) return { sessionId }
+    if (target.kind === 'session' && target.sessionId === sessionId) return { sessionId }
+    if (target.kind === 'new' && fileCount > 0) return { target, sourceSessionId: sessionId }
+    return { target }
+  }
+
+  /**
    * Turn the current composer draft into a create request and send it.
    *
    * Attachment ids are serialized by the concrete conversation service, so an
@@ -1442,10 +1459,7 @@ export function createClientPlugin(require) {
     // The default destination keeps the v1 request byte-identical: `sessionId`
     // names this conversation, exactly as a 0.3.x client sends it. Any other
     // destination travels as `target`, and the two never travel together.
-    const target = plan?.target ?? null
-    const addressed = target !== null && !(target.kind === 'session' && target.sessionId === sessionId)
-      ? { target }
-      : { sessionId }
+    const addressed = createDestination(plan?.target ?? null, sessionId, fileReceipts.length)
     const value = await postJson(API + '/create', {
       ...addressed,
       dueAt: new Date(plan.instantMs).toISOString(),
@@ -3319,6 +3333,7 @@ export function createClientPlugin(require) {
       draftOf,
       draftPayload,
       pendingAttachments,
+      createDestination,
       filterTargets,
       sortSessions,
       destinationOf,

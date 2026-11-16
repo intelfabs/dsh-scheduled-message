@@ -120,6 +120,8 @@ function createHost(options = {}) {
     listError: null,
     summaries: [],
     uploaded: [],
+    resolveAgentCalls: [],
+    resolveCalls: [],
     scheduleListCalls: [],
     scheduleListError: null,
     scheduleListValue: { items: [], shown: 0, total: 0, limit: 100, offset: 0 },
@@ -128,6 +130,7 @@ function createHost(options = {}) {
 
   const sessionController = {
     async resolveAgent(sessionId) {
+      state.resolveAgentCalls.push(sessionId)
       if (sessionId === 'missing-session') return { error: { message: 'session missing' } }
       return { agent: { session: { id: sessionId } } }
     },
@@ -208,8 +211,14 @@ function createHost(options = {}) {
   }
 
   const fileUploads = {
-    resolve(_agent, receiptId) {
-      return staged.get(receiptId)
+    // A receipt is staged inside exactly one conversation. Resolving it with
+    // another conversation's agent must fail, or a wrong-agent bug would pass.
+    resolve(agent, receiptId) {
+      const owner = agent?.session?.id
+      state.resolveCalls.push({ sessionId: owner, receiptId })
+      const entry = staged.get(receiptId)
+      if (entry === undefined || entry.owner !== owner) return undefined
+      return { type: entry.type, attachment: entry.attachment }
     },
     async uploadStream({ sessionId, data, name }) {
       const chunks = []
@@ -218,7 +227,7 @@ function createHost(options = {}) {
       const ref = { attachmentId: 'file-' + (fileBytes.size + 1), name: name ?? 'file', bytes: bytes.byteLength }
       fileBytes.set(ref.attachmentId, bytes)
       const receiptId = 'out-receipt-' + (uploads.length + 1)
-      staged.set(receiptId, { type: 'file', attachment: ref })
+      staged.set(receiptId, { type: 'file', attachment: ref, owner: sessionId })
       uploads.push({ sessionId, receiptId })
       return { receiptId, file: ref }
     },
@@ -309,12 +318,18 @@ function createHost(options = {}) {
     storageDomain,
     log,
     workspaces,
-    /** Stage one inbound file receipt the composer would have uploaded. */
-    stageFile(name, text) {
+    /**
+     * Stage one inbound file receipt the composer would have uploaded.
+     * @param name - display name.
+     * @param text - the file bytes, as text.
+     * @param owner - the conversation that uploaded it; `session-a` by default.
+     * @returns the receipt id.
+     */
+    stageFile(name, text, owner = 'session-a') {
       const ref = { attachmentId: 'in-file-' + (fileBytes.size + 1), name, bytes: Buffer.byteLength(text) }
       fileBytes.set(ref.attachmentId, Buffer.from(text))
       const receiptId = 'in-receipt-' + (staged.size + 1)
-      staged.set(receiptId, { type: 'file', attachment: ref })
+      staged.set(receiptId, { type: 'file', attachment: ref, owner })
       return receiptId
     },
   }
@@ -1071,6 +1086,156 @@ export async function runHostSmoke() {
   await until(() => table.get(bornId)?.status === 'sent', 'the retried new-conversation delivery')
   equal(host.state.createCalls.length, createsAtCreate + 1, 'the retry reuses the conversation')
 
+  // 33b. A new-conversation create carries a staged file by naming its uploader.
+  const sourceReceipt = host.stageFile('carried.txt', 'carried-bytes', 'session-a')
+  const carryDue = new Date(Date.now() + 120_000).toISOString()
+  const carried = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' },
+      sourceSessionId: 'session-a',
+      dueAt: carryDue,
+      timeZone: 'Asia/Hong_Kong',
+      text: 'carry this',
+      fileReceipts: [sourceReceipt],
+    },
+  })
+  equal(carried.ok, true, 'a new conversation may take a staged file')
+  equal(carried.value.kind, 'once', 'it is a one-shot record')
+  equal(carried.value.message.target.kind, 'new', 'the stored destination stays a new conversation')
+  equal(carried.value.message.sessionId, undefined, 'the uploader is not stored as the destination')
+  equal(carried.value.message.fileCount, 1, 'the durable file ref is counted')
+  equal(carried.value.message.files[0].name, 'carried.txt', 'the ref keeps its name')
+  equal(host.state.resolveCalls.at(-1), { sessionId: 'session-a', receiptId: sourceReceipt },
+    'the receipt is resolved with the agent of sourceSessionId')
+  const carriedId = carried.value.message.id
+  equal(stored(host, carriedId).files.length, 1, 'the record stores one file ref')
+  equal(stored(host, carriedId).sessionId, undefined, 'the record still owns no session')
+
+  const createsCarried = host.state.createCalls.length
+  const uploadsCarried = host.uploads.length
+  await makeDue(host, carriedId)
+  await fireWhenArmed(host)
+  await until(() => table.get(carriedId)?.status === 'sent', 'the carried-file message to settle')
+  equal(host.state.createCalls.length, createsCarried + 1, 'delivery opens exactly one conversation')
+  const carriedSession = stored(host, carriedId).sessionId
+  ok(typeof carriedSession === 'string', 'the opened conversation is stored on the record')
+  equal(host.uploads.length, uploadsCarried + 1, 'the stored file is uploaded once')
+  equal(host.uploads.at(-1).sessionId, carriedSession, 'uploadStream targets the conversation it opened')
+  const carriedContent = host.prompts.at(-1).content
+  equal(carriedContent.length, 2, 'the prompt carries the text and the file')
+  equal(carriedContent[0], { type: 'text', text: 'carry this' }, 'the text arrives first')
+  equal(carriedContent[1].type, 'file', 'the fresh receipt is a file part')
+  equal(carriedContent[1].receiptId, host.uploads.at(-1).receiptId, 'the part cites the receipt uploaded for this conversation')
+  ok(carriedContent[1].receiptId !== sourceReceipt, 'the browser receipt is not reused')
+
+  const unknownSource = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      sourceSessionId: 'missing-session',
+      dueAt: carryDue,
+      timeZone: 'UTC',
+      text: 'x',
+      fileReceipts: [host.stageFile('ghost.txt', 'x', 'missing-session')],
+    },
+  })
+  equal(unknownSource.error?.code, 'unknown-session', 'a source conversation that cannot be resolved is refused')
+  const bogusReceipt = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      sourceSessionId: 'session-a',
+      dueAt: carryDue,
+      timeZone: 'UTC',
+      text: 'x',
+      fileReceipts: ['nope'],
+    },
+  })
+  equal(bogusReceipt.error?.code, 'unknown-receipt', 'a receipt the Host never staged is refused')
+  const foreignReceipt = host.stageFile('foreign.txt', 'x', 'session-b')
+  const foreign = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      sourceSessionId: 'session-a',
+      dueAt: carryDue,
+      timeZone: 'UTC',
+      text: 'x',
+      fileReceipts: [foreignReceipt],
+    },
+  })
+  equal(foreign.error?.code, 'unknown-receipt', 'a receipt uploaded in another conversation is refused')
+
+  const imageOnlyNew = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      dueAt: carryDue,
+      timeZone: 'UTC',
+      text: 'x',
+      images: [{ mediaType: 'image/png', data: imageBase64 }],
+    },
+  })
+  equal(imageOnlyNew.ok, true, 'an image-only new-conversation draft needs no sourceSessionId')
+  equal(imageOnlyNew.value.message.imageCount, 1, 'the image is stored on the new-conversation record')
+
+  const resolvesBefore = host.state.resolveAgentCalls.length
+  const vacantSource = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      sourceSessionId: 'session-a',
+      dueAt: carryDue,
+      timeZone: 'UTC',
+      text: 'x',
+    },
+  })
+  equal(vacantSource.ok, true, 'sourceSessionId without file receipts is accepted')
+  equal(host.state.resolveAgentCalls.length, resolvesBefore, 'and resolves no agent')
+  equal(vacantSource.value.message.fileCount, 0, 'no file ref is invented')
+
+  // 33c. The editor adds a file to a new-conversation record, moves it there and
+  // back, and delivery still carries the file into the conversation it opens.
+  const editorBorn = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' },
+      dueAt: carryDue,
+      timeZone: 'Asia/Hong_Kong',
+      text: 'editor carry',
+    },
+  })
+  const editorId = editorBorn.value.message.id
+  const editorUpload = await body(uploadRoute, { raw: Buffer.from('editor-bytes'), query: '?name=' + encodeURIComponent('editor.pdf') })
+  const editorAdded = await body(updateRoute, {
+    body: { id: editorId, expectedUpdatedAt: stored(host, editorId).updatedAt, addFileIds: [editorUpload.value.fileId] },
+  })
+  equal(editorAdded.ok, true, 'a new-conversation record accepts a file in the editor')
+  equal(editorAdded.value.message.target.kind, 'new', 'adding a file does not change the destination')
+  equal(editorAdded.value.message.files.length, 1, 'the file ref joins the record')
+  equal(editorAdded.value.message.sessionId, undefined, 'the record still owns no session')
+  const movedToSession = await body(updateRoute, {
+    body: {
+      id: editorId,
+      expectedUpdatedAt: editorAdded.value.message.updatedAt,
+      target: { kind: 'session', sessionId: 'session-a' },
+    },
+  })
+  equal(movedToSession.value.message.target, { kind: 'session', sessionId: 'session-a' }, 'the record moves to a conversation')
+  equal(movedToSession.value.message.files.length, 1, 'the file survives the move')
+  const movedBack = await body(updateRoute, {
+    body: {
+      id: editorId,
+      expectedUpdatedAt: movedToSession.value.message.updatedAt,
+      target: { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' },
+    },
+  })
+  equal(movedBack.value.message.target.kind, 'new', 'the record moves back to a new conversation')
+  equal(movedBack.value.message.sessionId, undefined, 'the session id is dropped with the target')
+  equal(movedBack.value.message.files.length, 1, 'the file survives the move back')
+  await makeDue(host, editorId)
+  const createsEditor = host.state.createCalls.length
+  await fireWhenArmed(host)
+  await until(() => table.get(editorId)?.status === 'sent', 'the editor-carried file to settle')
+  equal(host.state.createCalls.length, createsEditor + 1, 'delivery opens one conversation')
+  const editorSession = stored(host, editorId).sessionId
+  equal(host.uploads.at(-1).sessionId, editorSession, 'the editor file is uploaded into the opened conversation')
+  equal(host.prompts.at(-1).content.at(-1).type, 'file', 'the moved file still reaches the prompt')
+
   // 34. A create body names one destination, and a dead one fails at create time.
   const soon = new Date(Date.now() + 120_000).toISOString()
   const bothDestinations = await body(created('/create'), {
@@ -1096,8 +1261,8 @@ export async function runHostSmoke() {
       fileReceipts: [host.stageFile('late.txt', 'bytes')],
     },
   })
-  equal(receiptForNew.error?.code, 'attachments-need-conversation',
-    'a staged file cannot follow a conversation that does not exist yet')
+  equal(receiptForNew.error?.code, 'invalid-request',
+    'a new conversation with attached files needs the conversation that uploaded them')
   const repeatNew = await body(created('/create'), {
     body: { target: { kind: 'new', cwd: 'C:/work/a' }, repeat: 'daily', dueAt: soon, timeZone: 'UTC', text: 'x' },
   })

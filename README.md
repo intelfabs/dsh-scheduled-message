@@ -150,9 +150,6 @@ or monthly on the chosen day. Monthly rules on the 29th–31st skip months that 
 - **No claim that a message was delivered.** DSH accepts a prompt into a conversation's queue and
   says nothing about the turn behind it, so a settled record reads **Accepted** rather than Sent, and
   no row ever says Running or Completed.
-- **No new conversation with attached files.** A staged file belongs to the conversation that uploaded
-  it, so a message addressed to a new conversation is refused at create time; send it to this
-  conversation instead.
 - **No cross-zone surprise.** The browser's IANA zone is captured at create time and only used for
   display and for the 12-hour reading; the Host stores one absolute instant.
 - **Disabling the plugin does not delete anything.** Pending records stay in storage and resume when
@@ -185,8 +182,21 @@ npm run check     # static gates
 
 ## Status
 
-`0.4.0`. 62 core tests, 24 client tests, one Host wrapper running 239 assertions, the static gates
-and the standalone Host smoke test (239 assertions) all pass.
+`0.4.1`. 64 core tests, 25 client tests, one Host wrapper running 277 assertions, the static gates
+and the standalone Host smoke test (277 assertions) all pass.
+
+0.4.1 lets a message scheduled to **New conversation** carry attached files. The browser's upload
+receipt is memory-only and belongs to the composer's conversation, so the create request now names
+that conversation (`sourceSessionId`); the Host resolves each receipt to a durable file reference
+before the record is stored, and delivery re-uploads it into the conversation it opens — the same
+path that already worked for *This conversation*. An image-only draft is unchanged, the session-form
+request is byte-identical, and the record schema stays v2. The dialog also loses a stale warning that
+claimed a new conversation could not take files; it fired even for image-only drafts, where it was
+wrong before this change.
+
+The automated gates cover the request, the store and the delivery path against stand-ins. The live
+round trip — a real file scheduled to a new conversation, with the source tab closed before delivery —
+is still owed ([docs/DETAIL.md](docs/DETAIL.md#7-verification)).
 
 0.4.0 makes the destination explicit and the status honest. The compose dialog now names where the
 message goes: **New conversation** by default — opened at send time, exactly once, reused on retry —
@@ -210,7 +220,8 @@ answers an empty string instead of throwing, the editor only writes the summary 
 instant, and `test/client.test.mjs` renders the editor's first paint so it cannot come back.
 
 Verified: the two project gates, the Host end-to-end smoke test (including a v1 record opening
-under the v2 schema and a `kind:'new'` delivery that creates exactly one conversation), the
+under the v2 schema, a `kind:'new'` delivery that creates exactly one conversation, and a staged file
+carried into the conversation that delivery opens), the
 bundle-freshness and dictionary-parity gates, the panel's two slot registrations structurally,
 and the tab itself rendering in the live desktop GUI. Still a human look away: the editor's
 sheet/dialog/bottom-sheet layouts, the destination picker against a real workspace list, and the

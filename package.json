@@ -1,6 +1,6 @@
 {
   "name": "dsh-scheduled-message",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Schedule the message you are writing, manage every scheduled message from one sidebar tab, or turn it into a repeating automation task.",
   "license": "MIT",
   "author": "intelfabs",

@@ -524,6 +524,35 @@ test('save sends only changed fields and always the record version', async () =>
   assert.deepEqual(attach.addImages, [{ mediaType: 'image/png', data: 'AAAA', name: 'shot.png' }])
 })
 
+test('a create request names the source conversation only for staged files', async () => {
+  const internals = await loadInternals()
+  const fresh = { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' }
+
+  assert.deepEqual(internals.createDestination(null, 'session-a', 0), { sessionId: 'session-a' },
+    'the default destination stays the v1 session form')
+  assert.deepEqual(internals.createDestination(undefined, 'session-a', 2), { sessionId: 'session-a' },
+    'an absent target is the session form too')
+  assert.deepEqual(
+    internals.createDestination({ kind: 'session', sessionId: 'session-a' }, 'session-a', 1),
+    { sessionId: 'session-a' },
+    'this conversation keeps the session form even with files',
+  )
+  assert.deepEqual(
+    internals.createDestination({ kind: 'session', sessionId: 'session-b' }, 'session-a', 0),
+    { target: { kind: 'session', sessionId: 'session-b' } },
+    'another conversation travels as a target',
+  )
+  assert.deepEqual(internals.createDestination(fresh, 'session-a', 0), { target: fresh },
+    'an image-only new conversation needs no source session')
+  assert.deepEqual(internals.createDestination(fresh, 'session-a', 1), { target: fresh, sourceSessionId: 'session-a' },
+    'a staged file names the conversation that uploaded it')
+  assert.equal(
+    'sourceSessionId' in internals.createDestination({ kind: 'session', sessionId: 'session-b' }, 'session-a', 1),
+    false,
+    'a target aimed at another conversation never claims an uploader',
+  )
+})
+
 test('the editor starts from the record and resolves a saved wall clock', async () => {
   const internals = await loadInternals()
   const base = makeRecord({ dueAt: '2026-11-16T01:30:00.000Z' })

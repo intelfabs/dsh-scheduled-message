@@ -34,7 +34,6 @@
   "dialog.noText": "Only attachments",
   "dialog.destination": "Send to",
   "dialog.thisConversation": "This conversation",
-  "dialog.newWithAttachments": "A new conversation can't take attached files — images are fine. Pick This conversation to send a file.",
   "dialog.newUnavailable": "This conversation's workspace could not be found, so a new conversation cannot be created from here.",
   "dialog.conflictHint": "Another message is already scheduled for this conversation around this time, so this one may wait for the earlier turn to finish.",
 
@@ -95,7 +94,6 @@
   "error.attachmentsUnavailable": "This conversation cannot hand over its attachments.",
   "error.uploading": "Wait for uploads to finish, then try again.",
   "error.unknownWorkspace": "The workspace this message was addressed to no longer exists.",
-  "error.attachmentsNeedConversation": "A new conversation can't take attached files; send this message to this conversation instead.",
   "error.repeatWithNewConversation": "A repeating message needs an existing conversation.",
 
   "panel.label": "Scheduled",

@@ -177,8 +177,8 @@ domain refusals are not HTTP failures, and the carrier already answers `401`/`40
 runs. Codes: `invalid-request`, `too-soon`, `empty`, `invalid-due-at`, `invalid-time-zone`,
 `invalid-repeat`, `repeat-with-attachments`, `repeat-with-new-conversation`, `too-many-images`,
 `invalid-images`, `invalid-files`, `text-too-long`, `invalid-session`, `invalid-target`,
-`unknown-session`, `unknown-workspace`, `unknown-receipt`, `attachments-need-conversation`,
-`repeat-unavailable`, `too-many-pending`, `not-pending`, `not-found`, `internal`.
+`unknown-session`, `unknown-workspace`, `unknown-receipt`, `repeat-unavailable`,
+`too-many-pending`, `not-pending`, `not-found`, `internal`.
 
 ### 3.4 Create flow
 
@@ -188,16 +188,19 @@ runs. Codes: `invalid-request`, `too-soon`, `empty`, `invalid-due-at`, `invalid-
    not empty, and no attachments when Repeat is on. A `kind: 'new'` target also refuses Repeat, which
    the Automation service can only create against one conversation that already exists.
 2. **Resolve the destination.** A session target is resolved with `sessionController.resolveAgent`;
-   a missing conversation is refused before anything is stored. A new-conversation target only checks
-   that its workspace still exists (`unknown-workspace`), and its staged file receipts are refused
-   (`attachments-need-conversation`): a receipt belongs to the conversation that uploaded it, and
-   that is not the conversation this message will open. `sessionController.create` is **not** called
-   here — a record that is cancelled must not leave an empty conversation behind.
+   a missing conversation is refused before anything is stored. A new-conversation target checks that
+   its workspace still exists (`unknown-workspace`) and, when it carries staged files, resolves the
+   conversation that uploaded them (`sourceSessionId`; missing or unresolved → `unknown-session`),
+   then converts each receipt to its durable `FileAttachmentRef` (`unknown-receipt`). A receipt is
+   memory-only and belongs to the uploader, not to the conversation this message will open.
+   `sessionController.create` is **not** called here — a record that is cancelled must not leave an
+   empty conversation behind.
 3. **Repeat branch**: `ctx.schedule.create({ title: summariseTitle(text), prompt: text,
    timing: { kind: 'rrule', rrule }, target: { kind: 'session', sessionId } })` and answer
    `{ kind: 'automation', taskId, rrule }`. No scheduled-message record is written.
 4. **One-shot branch**: `saveImages` for the browser-encoded images, `fileUploads.resolve` for each
-   staged file receipt, then one `pending` record carrying the validated target, and a re-armed timer.
+   staged file receipt (against the uploader's agent when the target is a new conversation), then one
+   `pending` record carrying the validated target and only durable refs, and a re-armed timer.
 
 ### 3.5 Timer
 
@@ -274,9 +277,9 @@ overlays, so a portal is required, not cosmetic. It holds:
   opened at delivery, exactly once, and reused on retry. *This conversation* is one click away and keeps
   the v1 request byte-identical (`sessionId`) — that is now the deliberate choice rather than the
   default. When the workspace cannot be named the option is disabled and the dialog says why — a path is
-  never guessed — and the control falls back to *This conversation*. Attachments switch the copy, not the
-  choice: a new conversation can carry images but not staged files, so picking it with attachments on
-  shows that limit before the Host refuses the create (`attachments-need-conversation`);
+  never guessed — and the control falls back to *This conversation*. Attachments do not change the
+  choice: images travel as base64, and a staged file travels with the `sourceSessionId` that names the
+  conversation which uploaded it, so a new conversation can carry both;
 - one quiet line when another pending message targets the same conversation within
   `core.CONFLICT_WINDOW_MS`. It is informational: the primary action stays enabled, because a second
   message simply queues behind the first turn;
@@ -351,7 +354,10 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
 | Agent running at due time | Delivered with `mode: 'queue'`, exactly like Enter. The record still reports acceptance, never a running state. |
 | Two messages to one conversation, same instant | Both are accepted and run one turn after the other. Create and edit say so inline; nothing is refused. |
 | A settled record | Reads **Accepted** (or **accepted late**). The plugin cannot observe the turn, so no row claims Sent, Running or Completed. |
-| New conversation with attached files | Refused at create time (`attachments-need-conversation`): a receipt belongs to the conversation that uploaded it. |
+| New conversation with attached files | Carried: each staged file is resolved to a durable ref at create time and re-uploaded into the conversation delivery opens. |
+| New conversation whose uploader conversation is gone | Refused at create time (`unknown-session`): a receipt can only be resolved while its conversation exists. |
+| Staged receipt missing, or uploaded in another conversation | Refused at create time (`unknown-receipt`); attach the file again. |
+| New conversation with receipts but no `sourceSessionId` | Refused at create time (`invalid-request`). No shipped client sends this. |
 | New conversation for a workspace that is gone | Refused at create time (`unknown-workspace`) instead of failing at the due instant. |
 | Conversation archived or deleted | `resolveAgent`/`prompt` fails → `failed` with the reason; Cancel still works. |
 | Model rejects images | `prompt` fails → `failed` with the host diagnostic. |
@@ -368,29 +374,36 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
 <a id="6-tests"></a>
 ## 6. Tests
 
-`npm test` (87 tests):
+`npm test` (90 tests):
 
-- `test/core.test.mjs` — 62 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
+- `test/core.test.mjs` — 64 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
   (09:00 in `Asia/Hong_Kong` → `01:00Z`), a round-trip across five zones and three dates, a DST gap
   refused, an ambiguous hour resolved, every validator rejection (past, <30 s, empty, >10 images,
-  repeat with attachments, oversized text, bad zone, bad instant), RRULE text for all four
-  frequencies including `DTSTART;TZID=`, `WKST`, `BYMONTHDAY`, nearest-due selection, timer chunking
-  past 2^31−1, retention, the storage-unit-name pattern and the 120-character title summary.
-- `test/client.test.mjs` — 24 tests. The committed bundle equals a fresh build; both dictionaries
+  repeat with attachments, oversized text, bad zone, bad instant), the session form normalizing with
+  no new field, `sourceSessionId` accepted only for a new target with files (missing, empty,
+  non-string and session-form cases refused), RRULE text for all four frequencies including
+  `DTSTART;TZID=`, `WKST`, `BYMONTHDAY`, nearest-due selection, timer chunking past 2^31−1,
+  retention, the storage-unit-name pattern and the 120-character title summary.
+- `test/client.test.mjs` — 25 tests. The committed bundle equals a fresh build; both dictionaries
   declare one key set; executing `client.js` through a `window.__ModuleLoader__` facade yields the
   documented plugin; `apply` registers exactly the button (`conversation.input.right`, order 900) and
   the strip (`conversation.input.dock`, order 30) and one shortcut with Alt+Enter on all six
   profiles, `pass` outside an editor and a `blocked` reason inside one with no composer; the
   registered button mounts with a fake input machine and is clickable exactly when `useInput`
-  reports text or an attachment and the phase is `plain`; the bundle requires nothing outside the
-  baseline table.
-- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 239 assertions against in-memory services:
+  reports text or an attachment and the phase is `plain`; the create destination helper keeps the
+  session form field-free, adds `sourceSessionId` only for a new target with staged files and never
+  for an image-only draft; the bundle requires nothing outside the baseline table.
+- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 277 assertions against in-memory services:
   the six routes, six refusals that write nothing, a text create/list/deliver round trip with the
   derived request id and queued mode, a failed delivery plus retry with the same id, send-now,
   cancel and `not-pending`/`not-found`, reschedule and the 30 s guard, crash recovery from
-  `sending`, an image and a file surviving to delivery, Repeat producing an Automation task with the
-  expected title/target/RRULE and no local record, and a profile without the Automation service
-  refusing Repeat while one-shots still work.
+  `sending`, an image and a file surviving to delivery, a file scheduled to a new conversation
+  (create stores the ref and opens no session; delivery uploads it into the conversation it opens),
+  `unknown-session`/`unknown-receipt`/`invalid-request` refusals for that path, an image-only new
+  target staying accepted, a source id without files resolving no agent, the editor adding a file to
+  a new-conversation record and moving it to a conversation and back, Repeat producing an Automation
+  task with the expected title/target/RRULE and no local record, and a profile without the Automation
+  service refusing Repeat while one-shots still work.
 
 `npm run check` re-checks the bundle freshness, parses all four JS files, verifies the manifest
 exports, the dictionary parity, that every `t('…')` key exists in both dictionaries, that promised
@@ -399,16 +412,16 @@ files exist, and that `lib/core.js` stays dependency-free.
 <a id="7-verification"></a>
 ## 7. Verification
 
-In 0.4.0, `npm test` reports **87 tests passing** (62 core, 24 client, 1 Host wrapper that runs
-239 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 239 assertions.
-The 0.3.1 numbers were 81 tests (60 core, 20 client, 206 assertions); 0.2.x was 32 tests (26 core,
-5 client, a 66-assertion Host wrapper).
+In 0.4.1, `npm test` reports **90 tests passing** (64 core, 25 client, 1 Host wrapper that runs
+277 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 277 assertions.
+The 0.4.0 numbers were 87 tests (62 core, 24 client, 239 assertions); 0.3.1 was 81 (60 core, 20 client,
+206 assertions); 0.2.x was 32 (26 core, 5 client, a 66-assertion Host wrapper).
 
 ### 7.1 Automated
 
 - `node --check` on all four JavaScript files; both JSON dictionaries and the patch YAML parse.
 - The bundle-freshness gate, the dictionary-parity gate and the `t('…')` key-coverage gate.
-- The Host end-to-end smoke test (239 assertions) described in [§6](#6-tests).
+- The Host end-to-end smoke test (277 assertions) described in [§6](#6-tests).
 
 ### 7.2 Live, on an isolated DSH 0.2.2-rc.2 instance
 
@@ -477,7 +490,14 @@ observed (§7.3).
    instead. `layout.selectPanel('schedules')` still runs only from browser interactions.
 4. **A message with images or files has not been delivered by a real Host.** The re-read, re-upload
    and re-stage paths are covered by the smoke test's stand-ins only.
-5. **A physical phone** was never used.
+5. **A file scheduled to a new conversation has not completed a live round trip.** The stub proves the
+   receipt is resolved against `sourceSessionId`, the stored ref survives, and `uploadStream` is
+   called with the new session id; only a GUI run can show that `uploadStream` succeeds against a
+   session `ensureSession` created seconds earlier, that `prompt` accepts the resulting
+   `{type:'file', receiptId}` part there, and that a stored ref stays readable after its source
+   conversation is disposed. The manual check: schedule +30 s to **New conversation** with one file,
+   close the source tab, wait, then open the new conversation and confirm the file arrived.
+6. **A physical phone** was never used.
 
 <a id="8-deviations-from-planmd"></a>
 ## 8. Deviations from PLAN.md
@@ -583,8 +603,8 @@ one, and the repeated request id is refused by the Session inbox.
 
 ### 9.6 Verification status for v2
 
-All automated gates pass: 59 core tests, 19 client tests, the Host wrapper (206 assertions), the
-static gates in `scripts/check.mjs`, and `test/support/host-smoke.mjs` (206 assertions, including a v1
+All automated gates pass: 64 core tests, 25 client tests, the Host wrapper (277 assertions), the
+static gates in `scripts/check.mjs`, and `test/support/host-smoke.mjs` (277 assertions, including a v1
 record opening under the v2 schema and a `kind:'new'` delivery that creates exactly one session).
 
 The tab was rendered in the live desktop GUI straight after the build: the sidebar entry, the page

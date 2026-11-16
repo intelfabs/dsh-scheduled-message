@@ -969,6 +969,68 @@ test('a create request names exactly one destination', () => {
   }), NOW).ok, true, 'a new conversation may still take an image')
 })
 
+test('the session form normalizes exactly as before sourceSessionId existed', () => {
+  const result = validateCreateRequest(baseRequest(), NOW)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.value, {
+    target: { kind: 'session', sessionId: 'session-a' },
+    sessionId: 'session-a',
+    dueAt: new Date(NOW + 120_000).toISOString(),
+    dueMs: NOW + 120_000,
+    timeZone: HONG_KONG,
+    text: 'hello',
+    images: [],
+    fileReceipts: [],
+    repeat: null,
+  }, 'the v1 request gains no field at all')
+})
+
+test('sourceSessionId belongs only to a new conversation that carries files', () => {
+  const newTarget = { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' }
+  const withFile = (extra = {}) => baseRequest({
+    sessionId: undefined,
+    target: newTarget,
+    fileReceipts: ['receipt-1'],
+    ...extra,
+  })
+
+  const accepted = validateCreateRequest(withFile({ sourceSessionId: 'session-a' }), NOW)
+  assert.equal(accepted.ok, true)
+  assert.equal(accepted.value.sourceSessionId, 'session-a', 'the uploader is returned for the Host to resolve')
+  assert.deepEqual(accepted.value.target, newTarget)
+  assert.equal('sessionId' in accepted.value, false, 'a new conversation still has no session')
+
+  assert.equal(validateCreateRequest(withFile(), NOW).code, 'invalid-request', 'files need their uploader')
+  assert.equal(validateCreateRequest(withFile({ sourceSessionId: '' }), NOW).code, 'invalid-request',
+    'an empty uploader id is refused')
+  for (const wrong of [null, 7, {}, [], true]) {
+    assert.equal(validateCreateRequest(withFile({ sourceSessionId: wrong }), NOW).code, 'invalid-request',
+      'a non-string uploader id is refused')
+  }
+  assert.equal(validateCreateRequest(baseRequest({ sourceSessionId: 'session-a' }), NOW).code, 'invalid-request',
+    'the session form never carries it')
+  assert.equal(validateCreateRequest(baseRequest({
+    sessionId: undefined,
+    target: { kind: 'session', sessionId: 'session-b' },
+    sourceSessionId: 'session-a',
+  }), NOW).code, 'invalid-request', 'a session target never carries it')
+
+  const noFiles = validateCreateRequest(baseRequest({
+    sessionId: undefined,
+    target: newTarget,
+    sourceSessionId: 'session-a',
+  }), NOW)
+  assert.equal(noFiles.ok, true, 'a new conversation without files may still name its uploader')
+  assert.equal(noFiles.value.sourceSessionId, 'session-a')
+
+  const imageOnly = validateCreateRequest(baseRequest({
+    sessionId: undefined,
+    target: newTarget,
+    images: [{ mediaType: 'image/png', data: 'AAAA' }],
+  }), NOW)
+  assert.equal(imageOnly.ok, true, 'an image-only new conversation needs no uploader')
+})
+
 /** One stored record as the tab would hold it. */
 function pendingAt(id, dueIso, extra = {}) {
   return {

@@ -51,7 +51,7 @@ const MAX_TITLE_CHARS = 120
 /** `setTimeout` stores its delay in a signed 32-bit integer. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
-/** A delivery later than this after its due instant is reported as sent late. */
+/** Acceptance later than this after the due instant is reported as accepted late. */
 const LATE_THRESHOLD_MS = 60_000
 
 /** Finished records older than this are pruned. */
@@ -81,8 +81,14 @@ const MAX_IMAGE_BYTES = 5_000_000
 /** Fallback cap on every image of one message together, in decoded bytes. */
 const MAX_MESSAGE_IMAGE_BYTES = 20_000_000
 
-/** Finished records a list still shows, in the trailing Sent group. */
+/** Settled records a list still shows, in the trailing accepted group. */
 const SENT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Two pending messages to one conversation this close together queue behind
+ * each other: DSH accepts both, then runs one turn after the other.
+ */
+const CONFLICT_WINDOW_MS = 120_000
 
 /** Repeat frequencies the composer offers. */
 const REPEAT_FREQUENCIES = Object.freeze(['daily', 'weekdays', 'weekly', 'monthly'])
@@ -316,6 +322,10 @@ function summariseTitle(text, max = MAX_TITLE_CHARS) {
  *
  * Pure: the caller supplies the clock, so the same request validates
  * identically in the browser and in the Host.
+ * The body names exactly one destination: the v1 `sessionId`, or a v2
+ * `target` that may also open a new conversation at send time. Both or neither
+ * is refused instead of being resolved by a fallback, so an old client keeps
+ * sending the one shape it always sent.
  * @param payload - untrusted request body.
  * @param nowMs - the accepting clock.
  * @returns normalized content, or a stable rejection code and message.
@@ -326,7 +336,12 @@ function validateCreateRequest(payload, nowMs) {
     return fail('invalid-request', 'The request body must be an object.')
   }
   const { sessionId, dueAt, timeZone } = payload
-  if (typeof sessionId !== 'string' || sessionId.length === 0) return fail('invalid-session', 'A session id is required.')
+  const hasSessionId = typeof sessionId === 'string' && sessionId.length > 0
+  const hasTarget = payload.target !== undefined && payload.target !== null
+  if (hasSessionId && hasTarget) {
+    return fail('invalid-request', 'Send either sessionId or target, not both.')
+  }
+  if (!hasSessionId && !hasTarget) return fail('invalid-session', 'A session id is required.')
   if (typeof dueAt !== 'string' || !ISO_INSTANT.test(dueAt)) {
     return fail('invalid-due-at', 'dueAt must be an absolute ISO instant with an offset or Z.')
   }
@@ -336,6 +351,11 @@ function validateCreateRequest(payload, nowMs) {
     return fail('too-soon', `Choose a time at least ${Math.round(MIN_LEAD_MS / 1000)} seconds from now.`)
   }
   if (!isValidTimeZone(timeZone)) return fail('invalid-time-zone', 'timeZone must be an IANA zone name or UTC.')
+
+  const target = hasTarget
+    ? validateTarget(payload.target)
+    : { ok: true, value: { kind: 'session', sessionId } }
+  if (target.ok !== true) return fail(target.code, target.message)
 
   const text = typeof payload.text === 'string' ? payload.text : ''
   if (text.length > MAX_TEXT_CHARS) return fail('text-too-long', `A message may carry at most ${MAX_TEXT_CHARS} characters.`)
@@ -370,11 +390,17 @@ function validateCreateRequest(payload, nowMs) {
   if (repeat !== null && trimmed.length === 0) {
     return fail('empty', 'A repeating message needs text.')
   }
+  // A repeating task is created against one conversation in the Automation
+  // service, so it cannot be addressed to one that does not exist yet.
+  if (repeat !== null && target.value.kind !== 'session') {
+    return fail('repeat-with-new-conversation', 'A repeating message needs an existing conversation.')
+  }
 
   return {
     ok: true,
     value: {
-      sessionId,
+      target: target.value,
+      ...(target.value.kind === 'session' ? { sessionId: target.value.sessionId } : {}),
       dueAt: new Date(dueMs).toISOString(),
       dueMs,
       timeZone,
@@ -1007,6 +1033,44 @@ function sortPendingRecords(records) {
   return rows.map((row) => row.record)
 }
 
+/**
+ * The pending records a new message would queue behind.
+ *
+ * DSH accepts a prompt into one conversation's queue and runs the turns one at
+ * a time, so a second message due at the same instant waits for the first one to
+ * finish. Two messages further apart than {@link CONFLICT_WINDOW_MS} are not
+ * reported: a turn almost always ends inside that window.
+ *
+ * Only a `kind: 'session'` target conflicts — a `kind: 'new'` record opens its
+ * own conversation and queues behind nothing. The record being edited is
+ * excluded, so an editor never warns about itself.
+ * @param candidate - the `{ id?, target, dueAt }` about to be scheduled.
+ * @param records - every record the caller already holds.
+ * @param windowMs - how close two due instants must be; {@link CONFLICT_WINDOW_MS} by default.
+ * @returns the conflicting records, possibly none.
+ */
+function sameConversationConflict(candidate, records, windowMs) {
+  const target = isPlainObject(candidate?.target) ? candidate.target : null
+  if (target === null || target.kind !== 'session') return []
+  const sessionId = optionalText(target.sessionId)
+  if (sessionId === undefined) return []
+  const dueMs = Date.parse(candidate?.dueAt)
+  if (!Number.isFinite(dueMs)) return []
+  const window = Number.isFinite(windowMs) && windowMs >= 0 ? windowMs : CONFLICT_WINDOW_MS
+  const selfId = optionalText(candidate?.id)
+  const found = []
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!isPlainObject(record) || record.status !== 'pending') continue
+    if (selfId !== undefined && record.id === selfId) continue
+    const other = record.target
+    if (!isPlainObject(other) || other.kind !== 'session' || other.sessionId !== sessionId) continue
+    const otherMs = Date.parse(record.dueAt)
+    if (!Number.isFinite(otherMs)) continue
+    if (Math.abs(otherMs - dueMs) <= window) found.push(record)
+  }
+  return found
+}
+
 function settledMsOf(record) {
   return Date.parse(record.sentAt ?? record.updatedAt ?? record.createdAt)
 }
@@ -1194,7 +1258,7 @@ function deepSeekPeakNotice({ instantMs, modelName, timeZone } = {}) {
   return { windows: describePeakWindows(instantMs, timeZone) }
 }
 
-return { NS, DOMAIN_NAME, MIN_LEAD_MS, MAX_TEXT_CHARS, MAX_IMAGES, MAX_PENDING, MAX_TITLE_CHARS, MAX_TIMER_DELAY_MS, LATE_THRESHOLD_MS, RETENTION_MS, DOMAIN_VERSION, COMPATIBLE_VERSIONS, RECORD_STATUSES, MAX_ERROR_CHARS, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGE_BYTES, SENT_WINDOW_MS, REPEAT_FREQUENCIES, pad2, toMeridiem, to24Hour, formatClock, parseLocalDate, isValidTimeZone, localParts, zoneOffsetMs, wallClockToInstant, buildRrule, skipsShortMonths, summariseTitle, validateCreateRequest, migrateRecord, parseRecord, nextUpdatedAt, resolveSessionId, validateTarget, estimateBase64Bytes, checkMessageContent, validateMessageContent, validateMerged, validateUpdateRequest, earliestPending, timerDelay, isLate, pruneTargets, pendingSummary, dayLabel, sortPendingRecords, groupRecords, countPending, describeDue, describeZone, DEEPSEEK_PEAK_UTC_MINUTES, isDeepSeekPeak, isDeepSeekModel, describePeakWindows, deepSeekPeakNotice }
+return { NS, DOMAIN_NAME, MIN_LEAD_MS, MAX_TEXT_CHARS, MAX_IMAGES, MAX_PENDING, MAX_TITLE_CHARS, MAX_TIMER_DELAY_MS, LATE_THRESHOLD_MS, RETENTION_MS, DOMAIN_VERSION, COMPATIBLE_VERSIONS, RECORD_STATUSES, MAX_ERROR_CHARS, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGE_BYTES, SENT_WINDOW_MS, CONFLICT_WINDOW_MS, REPEAT_FREQUENCIES, pad2, toMeridiem, to24Hour, formatClock, parseLocalDate, isValidTimeZone, localParts, zoneOffsetMs, wallClockToInstant, buildRrule, skipsShortMonths, summariseTitle, validateCreateRequest, migrateRecord, parseRecord, nextUpdatedAt, resolveSessionId, validateTarget, estimateBase64Bytes, checkMessageContent, validateMessageContent, validateMerged, validateUpdateRequest, earliestPending, timerDelay, isLate, pruneTargets, pendingSummary, dayLabel, sortPendingRecords, sameConversationConflict, groupRecords, countPending, describeDue, describeZone, DEEPSEEK_PEAK_UTC_MINUTES, isDeepSeekPeak, isDeepSeekModel, describePeakWindows, deepSeekPeakNotice }
 })()
 
 const EN = {
@@ -1228,6 +1292,11 @@ const EN = {
   "dialog.saveTime": "Save time",
   "dialog.cancel": "Cancel",
   "dialog.noText": "Only attachments",
+  "dialog.destination": "Send to",
+  "dialog.thisConversation": "This conversation",
+  "dialog.newWithAttachments": "A new conversation can't take attached files — images are fine. Pick This conversation to send a file.",
+  "dialog.newUnavailable": "This conversation's workspace could not be found, so a new conversation cannot be created from here.",
+  "dialog.conflictHint": "Another message is already scheduled for this conversation around this time, so this one may wait for the earlier turn to finish.",
   "repeat.daily": "Daily",
   "repeat.weekdays": "Weekdays",
   "repeat.weekly": "Weekly",
@@ -1250,8 +1319,8 @@ const EN = {
   "dock.collapsed": "{count} scheduled · next {next}",
   "dock.collapsedEmpty": "Scheduled messages",
   "dock.noText": "Only attachments",
-  "dock.sent": "sent {time}",
-  "dock.sentLate": "sent late, {time}",
+  "dock.accepted": "accepted {time}",
+  "dock.acceptedLate": "accepted late, {time}",
   "dock.failed": "failed, was due {time}",
   "dock.sending": "sending…",
   "dock.sendNow": "Send now",
@@ -1279,6 +1348,9 @@ const EN = {
   "error.invalidImages": "One of the images could not be stored. Try attaching it again.",
   "error.attachmentsUnavailable": "This conversation cannot hand over its attachments.",
   "error.uploading": "Wait for uploads to finish, then try again.",
+  "error.unknownWorkspace": "The workspace this message was addressed to no longer exists.",
+  "error.attachmentsNeedConversation": "A new conversation can't take attached files; send this message to this conversation instead.",
+  "error.repeatWithNewConversation": "A repeating message needs an existing conversation.",
   "panel.label": "Scheduled",
   "panel.title": "Scheduled",
   "panel.viewAll": "View all",
@@ -1286,8 +1358,8 @@ const EN = {
   "panel.waitingMany": "{count} messages waiting",
   "panel.today": "Today",
   "panel.tomorrow": "Tomorrow",
-  "panel.sent": "Sent",
-  "panel.sentLate": "Sent late",
+  "panel.accepted": "Accepted",
+  "panel.acceptedLate": "Accepted late",
   "panel.cancelled": "Cancelled",
   "panel.repeating": "Repeating",
   "panel.repeatingHint": "Repeating messages are Automation tasks. They stay read-only here.",
@@ -1334,6 +1406,7 @@ const EN = {
   "editor.deleteTitle": "Delete this scheduled message?",
   "editor.deleteBody": "It will be removed from your schedule and will not be sent.",
   "editor.conflict": "This message changed in another tab. Review it and save again.",
+  "editor.conflictHint": "Another message is scheduled for this conversation around this time, so this one may wait for the earlier turn to finish.",
   "editor.notPending": "This message was sent while you were editing.",
   "editor.saved": "Changes saved",
   "editor.loading": "Loading the message…",
@@ -1383,6 +1456,11 @@ const ZH = {
   "dialog.saveTime": "保存时间",
   "dialog.cancel": "取消",
   "dialog.noText": "仅附件",
+  "dialog.destination": "发送到",
+  "dialog.thisConversation": "当前会话",
+  "dialog.newWithAttachments": "新会话不能携带附件文件（图片可以）。要发文件请选“当前会话”。",
+  "dialog.newUnavailable": "找不到此会话所属的工作区，因此无法从这里创建新会话。",
+  "dialog.conflictHint": "这个时间前后已经有一条消息发往同一会话，这条可能要等前一轮结束才会送达。",
   "repeat.daily": "每天",
   "repeat.weekdays": "工作日",
   "repeat.weekly": "每周",
@@ -1405,8 +1483,8 @@ const ZH = {
   "dock.collapsed": "{count} 条待发送 · 最近 {next}",
   "dock.collapsedEmpty": "定时消息",
   "dock.noText": "仅附件",
-  "dock.sent": "已发送 {time}",
-  "dock.sentLate": "已补发 {time}",
+  "dock.accepted": "已受理 {time}",
+  "dock.acceptedLate": "延迟受理 {time}",
   "dock.failed": "发送失败，原定 {time}",
   "dock.sending": "正在发送…",
   "dock.sendNow": "立即发送",
@@ -1434,6 +1512,9 @@ const ZH = {
   "error.invalidImages": "其中一张图片保存失败，请重新添加。",
   "error.attachmentsUnavailable": "此会话无法交出草稿附件。",
   "error.uploading": "请等附件上传完成后再试。",
+  "error.unknownWorkspace": "这条消息指向的工作区已不存在。",
+  "error.attachmentsNeedConversation": "新会话不能携带附件文件，请把这条消息发到当前会话。",
+  "error.repeatWithNewConversation": "重复消息需要一个已存在的会话。",
   "panel.label": "定时消息",
   "panel.title": "定时消息",
   "panel.viewAll": "查看全部",
@@ -1441,8 +1522,8 @@ const ZH = {
   "panel.waitingMany": "{count} 条待发送",
   "panel.today": "今天",
   "panel.tomorrow": "明天",
-  "panel.sent": "已发送",
-  "panel.sentLate": "补发",
+  "panel.accepted": "已受理",
+  "panel.acceptedLate": "延迟受理",
   "panel.cancelled": "已取消",
   "panel.repeating": "重复",
   "panel.repeatingHint": "重复消息属于自动化任务，这里只读。",
@@ -1489,6 +1570,7 @@ const ZH = {
   "editor.deleteTitle": "删除这条定时消息？",
   "editor.deleteBody": "它会从定时列表中移除，并且不会发送。",
   "editor.conflict": "这条消息在另一个标签页里被修改过，请检查后再次保存。",
+  "editor.conflictHint": "这个时间前后同一会话已有一条待发送消息，保存后这条可能要等前一轮结束才会送达。",
   "editor.notPending": "这条消息在编辑期间已发送。",
   "editor.saved": "已保存修改",
   "editor.loading": "正在加载消息…",
@@ -1561,6 +1643,9 @@ function createClientPlugin(require) {
     'not-pending': 'error.notPending',
     'not-found': 'error.notFound',
     'too-many-pending': 'error.tooManyPending',
+    'unknown-workspace': 'error.unknownWorkspace',
+    'attachments-need-conversation': 'error.attachmentsNeedConversation',
+    'repeat-with-new-conversation': 'error.repeatWithNewConversation',
     'invalid-images': 'error.invalidImages',
     'invalid-request': 'error.generic',
     conflict: 'editor.conflict',
@@ -1838,6 +1923,28 @@ function createClientPlugin(require) {
   }
 
   /**
+   * The workspace that owns one conversation, exactly as `/targets` described it.
+   *
+   * Null when there is no such conversation, or when the workspace carries no id
+   * to address it by: a workspace is never guessed from a path.
+   * @param targets - the `/targets` answer.
+   * @param sessionId - one conversation id.
+   * @returns the workspace entry, or null.
+   */
+  function workspaceForSession(targets, sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return null
+    const workspaces = Array.isArray(targets?.workspaces) ? targets.workspaces : []
+    for (const workspace of workspaces) {
+      if (workspace === null || workspace === undefined) continue
+      if (typeof workspace.id !== 'string' || workspace.id.length === 0) continue
+      const sessions = Array.isArray(workspace.sessions) ? workspace.sessions : []
+      const owns = sessions.some(session => session !== null && session !== undefined && session.id === sessionId)
+      if (owns) return workspace
+    }
+    return null
+  }
+
+  /**
    * Find the workspace that owns one open conversation.
    *
    * Returns null when no conversation has been open, when the targets answer has
@@ -1848,20 +1955,12 @@ function createClientPlugin(require) {
    * @returns `{ workspaceId, workspaceTitle }`, or null.
    */
   function resolveWorkspaceFilter(targets, sessionId) {
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return null
-    const workspaces = Array.isArray(targets?.workspaces) ? targets.workspaces : []
-    for (const workspace of workspaces) {
-      if (workspace === null || workspace === undefined) continue
-      const sessions = Array.isArray(workspace.sessions) ? workspace.sessions : []
-      const owns = sessions.some(session => session !== null && session !== undefined && session.id === sessionId)
-      if (!owns) continue
-      if (typeof workspace.id !== 'string' || workspace.id.length === 0) return null
-      return {
-        workspaceId: workspace.id,
-        workspaceTitle: typeof workspace.title === 'string' ? workspace.title : '',
-      }
+    const workspace = workspaceForSession(targets, sessionId)
+    if (workspace === null) return null
+    return {
+      workspaceId: workspace.id,
+      workspaceTitle: typeof workspace.title === 'string' ? workspace.title : '',
     }
-    return null
   }
 
   /**
@@ -1959,6 +2058,45 @@ function createClientPlugin(require) {
     return t('editor.noTarget')
   }
 
+  /**
+   * The locale key that describes one settled record.
+   *
+   * DSH accepts a prompt into the conversation's queue and reports nothing about
+   * the turn that carries it — not when it starts, not when it ends. "Accepted"
+   * is therefore the strongest true claim, and the copy never says Sent.
+   * @param record - one record, wire or stored shape.
+   * @returns 'dock.acceptedLate' or 'dock.accepted'.
+   */
+  function settledLabelKey(record) {
+    return record !== null && record !== undefined && record.late === true ? 'dock.acceptedLate' : 'dock.accepted'
+  }
+
+  /**
+   * The two destinations the compose dialog offers.
+   *
+   * "This conversation" is always available. "New conversation" exists only when
+   * the conversation being scheduled into resolves to a workspace with a path and
+   * an id, so a record opened in the editor shows the same destination it was
+   * created with. A path is never guessed: when it cannot be resolved, the option
+   * is unavailable and the dialog says so.
+   * @param targets - the `/targets` answer, or null while it is unknown.
+   * @param sessionId - the conversation the composer belongs to.
+   * @returns `{ sessionTarget, newTarget, workspaceTitle, unavailable }`.
+   */
+  function destinationChoices(targets, sessionId) {
+    const workspace = workspaceForSession(targets, sessionId)
+    const newTarget = newConversationTarget(workspace)
+    return {
+      sessionTarget: typeof sessionId === 'string' && sessionId.length > 0 ? { kind: 'session', sessionId } : null,
+      newTarget,
+      workspaceTitle: typeof workspace?.title === 'string' ? workspace.title : '',
+      unavailable: newTarget === null,
+      // A new conversation is what the dialog lands on; without a resolvable
+      // workspace the only usable destination is this conversation.
+      defaultChoice: newTarget === null ? 'session' : 'new',
+    }
+  }
+
   /** Pure card model: everything the card renders, with no DOM access. */
   function cardModel(record, zone, index) {
     const dueMs = Date.parse(record?.dueAt)
@@ -1992,7 +2130,8 @@ function createClientPlugin(require) {
   /** Day-group heading: a locale key for today/tomorrow/weekday, text for far dates. */
   function groupHeading(group, zone, locale) {
     if (group === null || group === undefined) return { kind: 'text', text: '' }
-    if (group.kind === 'sent') return { kind: 'key', key: 'panel.sent' }
+    // Settled rows are accepted by DSH's queue, not confirmed sent; see settledLabelKey.
+    if (group.kind === 'sent') return { kind: 'key', key: 'panel.accepted' }
     if (group.kind === 'today') return { kind: 'key', key: 'panel.today' }
     if (group.kind === 'tomorrow') return { kind: 'key', key: 'panel.tomorrow' }
     const dueMs = group.rows !== undefined && group.rows.length > 0 ? Date.parse(group.rows[0].dueAt) : Number.NaN
@@ -2550,7 +2689,7 @@ function createClientPlugin(require) {
    *   keep the dialog open with an inline error).
    */
   function ScheduleDialog(props) {
-    const { t, zone, mode, initial, repeatLocked, previewText, attachmentCount, modelName, onSubmit, onClose } = props
+    const { t, zone, mode, initial, repeatLocked, previewText, attachmentCount, modelName, destination, others, onSubmit, onClose } = props
     const locale = currentLocale()
     const titleId = useId()
     const panel = useRef(null)
@@ -2560,6 +2699,9 @@ function createClientPlugin(require) {
     const [repeat, setRepeat] = useState(null)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState(null)
+    // null until the user picks: the dialog follows the destination default, which
+    // can arrive a moment later when `/targets` answers.
+    const [picked, setPicked] = useState(null)
 
     const resolved = useMemo(() => resolveSelection(selection, zone), [selection, zone])
     const now = Date.now()
@@ -2575,6 +2717,28 @@ function createClientPlugin(require) {
         timeZone: zone,
       }) ?? null,
       [resolved, modelName, zone],
+    )
+
+    // A new conversation is the default; This conversation is one click away. The
+    // default follows `/targets`, so a dialog opened before that answer arrives
+    // still ends up on New once the workspace is known, unless the user has picked.
+    const defaultChoice = destination?.defaultChoice === 'new' ? 'new' : 'session'
+    const mayOpenNew = destination !== undefined && destination !== null
+      && destination.newTarget !== null && destination.newTarget !== undefined
+    const choice = picked === 'new' && !mayOpenNew ? 'session' : picked ?? defaultChoice
+
+    /** The destination this submit will use: this conversation, or a new one. */
+    const chosenTarget = destination === undefined || destination === null
+      ? null
+      : choice === 'new' && destination.newTarget !== null && destination.newTarget !== undefined
+        ? destination.newTarget
+        : destination.sessionTarget ?? null
+
+    // Informational only: another message to one conversation queues behind this
+    // one instead of refusing it, so the dialog warns and still saves.
+    const conflicts = core.sameConversationConflict(
+      { target: chosenTarget, dueAt: resolved?.ok === true ? new Date(resolved.instantMs).toISOString() : null },
+      others,
     )
 
     useEffect(() => {
@@ -2615,7 +2779,7 @@ function createClientPlugin(require) {
       setBusy(true)
       setError(null)
       try {
-        await onSubmit({ selection, repeat, instantMs: resolved.instantMs })
+        await onSubmit({ selection, repeat, instantMs: resolved.instantMs, target: chosenTarget })
       } catch (failure) {
         setError(failure)
         setBusy(false)
@@ -2718,12 +2882,43 @@ function createClientPlugin(require) {
             onClick: () => update({ meridiem }),
           }, meridiem)))),
 
+      destination === undefined || destination === null
+        ? null
+        : h('div', { className: 'dsm-dest' },
+          h('span', { className: 'dsm-label' }, t('dialog.destination')),
+          h('div', { className: 'dsm-seg-row', role: 'group', 'aria-label': t('dialog.destination') },
+            h('button', {
+              type: 'button',
+              className: 'dsm-seg dsm-seg-wide' + (choice === 'new' ? ' dsm-seg-on' : ''),
+              'aria-pressed': choice === 'new',
+              disabled: busy || destination.newTarget === null || destination.newTarget === undefined,
+              title: destination.workspaceTitle,
+              onClick: () => setPicked('new'),
+            }, t('panel.newConversation')),
+            h('button', {
+              type: 'button',
+              className: 'dsm-seg dsm-seg-wide' + (choice === 'session' ? ' dsm-seg-on' : ''),
+              'aria-pressed': choice === 'session',
+              disabled: busy,
+              onClick: () => setPicked('session'),
+            }, t('dialog.thisConversation'))),
+          choice === 'new' && attachmentCount > 0
+            ? h('p', { className: 'dsm-hint dsm-hint-warn' }, t('dialog.newWithAttachments'))
+            : null,
+          destination.unavailable === true
+            ? h('p', { className: 'dsm-hint' }, t('dialog.newUnavailable'))
+            : null),
+
       h('p', { className: `dsm-summary${tooSoon ? ' dsm-summary-bad' : ''}`, role: 'status' }, summary),
       peak === null
         ? null
         : h('p', { className: 'dsm-peak' },
           h(PeakIcon),
           h('span', null, t('dialog.peakHint', { windows: peak.windows }))),
+
+      conflicts.length === 0
+        ? null
+        : h('p', { className: 'dsm-hint dsm-hint-warn', role: 'note' }, t('dialog.conflictHint')),
 
       mode === 'create'
         ? h('div', { className: 'dsm-repeat' },
@@ -2835,8 +3030,15 @@ function createClientPlugin(require) {
       }
     }
 
-    const value = await postJson(`${API}/create`, {
-      sessionId,
+    // The default destination keeps the v1 request byte-identical: `sessionId`
+    // names this conversation, exactly as a 0.3.x client sends it. Any other
+    // destination travels as `target`, and the two never travel together.
+    const target = plan?.target ?? null
+    const addressed = target !== null && !(target.kind === 'session' && target.sessionId === sessionId)
+      ? { target }
+      : { sessionId }
+    const value = await postJson(API + '/create', {
+      ...addressed,
       dueAt: new Date(plan.instantMs).toISOString(),
       timeZone: zone,
       text: draft,
@@ -2917,6 +3119,26 @@ function createClientPlugin(require) {
     const modelName = useSessionModelName(sessionId)
     const [open, setOpen] = useState(false)
     const zone = useMemo(currentZone, [])
+    // The dialog names a destination, so it needs the same `/targets` answer the
+    // editor reads, and the list the tab already holds so it can warn about a
+    // second message to one conversation. Both are loaded when the dialog opens:
+    // no new endpoint, no polling.
+    useSyncExternalStore(subscribeAll, allSnapshot, () => 0)
+    const [targets, setTargets] = useState(targetCache.value)
+
+    useEffect(() => {
+      if (!open) return undefined
+      void loadAll()
+      let cancelled = false
+      loadTargets().then((value) => {
+        if (!cancelled) setTargets(value)
+      }, () => {
+        if (!cancelled) setTargets(null)
+      })
+      return () => {
+        cancelled = true
+      }
+    }, [open])
 
     useEffect(() => {
       if (sessionId === undefined) return undefined
@@ -2953,6 +3175,7 @@ function createClientPlugin(require) {
     rememberOpenSession(sessionId)
 
     const environment = { t, sessionId, draft, attachmentIds, inputActions }
+    const destination = destinationChoices(targets, sessionId)
 
     return h(React.Fragment, null,
       h('button', {
@@ -2979,6 +3202,8 @@ function createClientPlugin(require) {
           repeatLocked: attachmentIds.length > 0,
           previewText: draft,
           attachmentCount: attachmentIds.length,
+          destination,
+          others: allState.items,
           onClose: () => setOpen(false),
           onSubmit: async (plan) => {
             await createScheduledMessage(environment, plan)
@@ -3165,10 +3390,10 @@ function createClientPlugin(require) {
     const meta = attachmentSummary(t, item.imageCount, item.fileCount)
 
     if (item.status === 'sent') {
+      // Accepted, not sent: the plugin watched DSH take the prompt, never the turn.
       return h('li', { className: 'dsm-dock-row dsm-dock-row-sent' },
-        h('span', { className: 'dsm-dock-tick', 'aria-hidden': 'true' }, '✓'),
         h('span', { className: 'dsm-dock-text' }, preview),
-        h('span', { className: 'dsm-dock-time' }, item.late === true ? t('dock.sentLate', { time }) : t('dock.sent', { time })))
+        h('span', { className: 'dsm-dock-time' }, t(settledLabelKey(item), { time })))
     }
 
     if (item.status === 'failed') {
@@ -3233,7 +3458,7 @@ function createClientPlugin(require) {
           model.attachments > 0
             ? h('span', { className: 'dsm-card-attach' }, h(PaperclipGlyph), h('span', null, attachmentSummary(t, model.images, model.files)))
             : null,
-          model.late ? h('span', { className: 'dsm-card-late' }, t('panel.sentLate')) : null,
+          model.late ? h('span', { className: 'dsm-card-late' }, t('panel.acceptedLate')) : null,
           model.cancelled ? h('span', { className: 'dsm-card-late' }, t('panel.cancelled')) : null,
           model.sending ? h('span', null, t('dock.sending')) : null)),
       sent ? null : h('div', {
@@ -3399,7 +3624,7 @@ function createClientPlugin(require) {
             onClick: () => setSentOpen(current => !current),
           },
             h('span', { className: 'dsm-group-caret', 'aria-hidden': 'true' }, sentOpen ? '\u25BE' : '\u25B8'),
-            h('span', null, t('panel.sent') + ' (' + String(group.rows.length) + ')')),
+            h('span', null, t('panel.accepted') + ' (' + String(group.rows.length) + ')')),
           sentOpen ? h('div', { className: 'dsm-cards' }, group.rows.map(renderCard)) : null)
       }
       return h('section', { key: String(group.date ?? group.heading.text), className: 'dsm-group' },
@@ -3481,6 +3706,7 @@ function createClientPlugin(require) {
             locale,
             messageId: editing.id,
             opener: editing.opener,
+            others: items,
             onNotice: (text) => setNotice(text),
             onClose: closeEditor,
           })
@@ -3695,7 +3921,7 @@ function createClientPlugin(require) {
    * Host answers `conflict`.
    */
   function EditorSheet(props) {
-    const { t, zone, locale, messageId, opener, onClose, onNotice } = props
+    const { t, zone, locale, messageId, opener, onClose, onNotice, others } = props
     const titleId = useId()
     const panelRef = useRef(null)
     const textRef = useRef(null)
@@ -3805,6 +4031,18 @@ function createClientPlugin(require) {
     const destination = destinationOf(
       { target: draft === null ? null : draft.target, targetLabel: record === null ? undefined : record.targetLabel, sessionId: targetSessionId },
       sessionIndexOf(targets),
+    )
+    // An edit can move both the destination and the time, so the warning follows
+    // the draft. It never blocks saving: a second message simply queues.
+    const conflicts = core.sameConversationConflict(
+      {
+        id: record === null ? undefined : record.id,
+        target: draft === null ? null : draft.target,
+        dueAt: Number.isFinite(dueInstant)
+          ? new Date(dueInstant).toISOString()
+          : record === null ? null : record.dueAt,
+      },
+      others,
     )
 
     const requestClose = () => {
@@ -4179,7 +4417,10 @@ function createClientPlugin(require) {
                     },
                     onClose: () => setPickerOpen(false),
                   })
-                  : null),
+                  : null,
+                conflicts.length === 0
+                  ? null
+                  : h('p', { className: 'dsm-hint dsm-hint-warn', role: 'note' }, t('editor.conflictHint'))),
               confirmDelete
                 ? h(ConfirmDialog, {
                   t,
@@ -4282,6 +4523,10 @@ function createClientPlugin(require) {
   border:1px solid var(--dsw-alias-border-l1,#e4e4e7);background:var(--dsw-alias-bg-base,#fff);
   color:var(--dsw-alias-label-secondary,#71717a)}
 .dsm-seg-on{border-color:${ORANGE};color:#fff;background:${ORANGE}}
+.dsm-seg-row{display:flex;gap:4px}
+.dsm-seg-wide{flex:1 1 0}
+.dsm-dest{display:flex;flex-direction:column;gap:4px;padding-top:4px;
+  border-top:1px solid var(--dsw-alias-border-l1,#f0f0f1)}
 .dsm-summary{margin:0;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-secondary,#52525b)}
 .dsm-summary-bad{color:var(--dsw-alias-state-error-primary,#dc2626)}
 .dsm-peak{display:flex;align-items:flex-start;gap:6px;margin:0;padding:7px 9px;border-radius:8px;
@@ -4321,7 +4566,6 @@ function createClientPlugin(require) {
   color:var(--dsw-alias-label-primary,#18181b)}
 .dsm-dock-time{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#71717a);font-size:11px}
 .dsm-dock-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#71717a)}
-.dsm-dock-tick{color:var(--dsw-alias-state-success-primary,#16a34a)}
 .dsm-dock-error-text{flex:1 1 100%;margin:0;font-size:11px;color:var(--dsw-alias-state-error-primary,#dc2626)}
 .dsm-dock-actions{display:flex;gap:6px;margin-left:auto}
 .dsm-dock-error{margin:2px 0 0}
@@ -4671,6 +4915,9 @@ function createClientPlugin(require) {
       destinationOf,
       destinationText,
       newConversationTarget,
+      destinationChoices,
+      workspaceForSession,
+      settledLabelKey,
       targetKey,
       sameTarget,
       resolveWorkspaceFilter,

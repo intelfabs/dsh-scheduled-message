@@ -175,22 +175,29 @@ durable boundary.
 Every route answers `200` with `{ ok: true, value }` or `{ ok: false, error: { code, message } }`;
 domain refusals are not HTTP failures, and the carrier already answers `401`/`403` before a handler
 runs. Codes: `invalid-request`, `too-soon`, `empty`, `invalid-due-at`, `invalid-time-zone`,
-`invalid-repeat`, `repeat-with-attachments`, `too-many-images`, `invalid-images`, `invalid-files`,
-`text-too-long`, `invalid-session`, `unknown-session`, `unknown-receipt`, `repeat-unavailable`,
-`too-many-pending`, `not-pending`, `not-found`, `internal`.
+`invalid-repeat`, `repeat-with-attachments`, `repeat-with-new-conversation`, `too-many-images`,
+`invalid-images`, `invalid-files`, `text-too-long`, `invalid-session`, `invalid-target`,
+`unknown-session`, `unknown-workspace`, `unknown-receipt`, `attachments-need-conversation`,
+`repeat-unavailable`, `too-many-pending`, `not-pending`, `not-found`, `internal`.
 
 ### 3.4 Create flow
 
-1. **Validate** (`validateCreateRequest`, pure, clock injected): instant at least 30 s ahead, an
-   absolute ISO instant, a real IANA zone, text ≤200 000 chars, ≤10 images, not empty, and no
-   attachments when Repeat is on.
-2. **Resolve the conversation** with `sessionController.resolveAgent`. A missing conversation is
-   refused before anything is stored.
+1. **Validate** (`validateCreateRequest`, pure, clock injected): the body names exactly one
+   destination — the v1 `sessionId` or a v2 `target`, never both and never neither — plus an instant
+   at least 30 s ahead, an absolute ISO instant, a real IANA zone, text ≤200 000 chars, ≤10 images,
+   not empty, and no attachments when Repeat is on. A `kind: 'new'` target also refuses Repeat, which
+   the Automation service can only create against one conversation that already exists.
+2. **Resolve the destination.** A session target is resolved with `sessionController.resolveAgent`;
+   a missing conversation is refused before anything is stored. A new-conversation target only checks
+   that its workspace still exists (`unknown-workspace`), and its staged file receipts are refused
+   (`attachments-need-conversation`): a receipt belongs to the conversation that uploaded it, and
+   that is not the conversation this message will open. `sessionController.create` is **not** called
+   here — a record that is cancelled must not leave an empty conversation behind.
 3. **Repeat branch**: `ctx.schedule.create({ title: summariseTitle(text), prompt: text,
    timing: { kind: 'rrule', rrule }, target: { kind: 'session', sessionId } })` and answer
    `{ kind: 'automation', taskId, rrule }`. No scheduled-message record is written.
 4. **One-shot branch**: `saveImages` for the browser-encoded images, `fileUploads.resolve` for each
-   staged file receipt, then one `pending` record and a re-armed timer.
+   staged file receipt, then one `pending` record carrying the validated target, and a re-armed timer.
 
 ### 3.5 Timer
 
@@ -217,6 +224,15 @@ Delivery is serialized through one promise chain, so two due records never inter
 5. prune, then re-arm.
 
 `mode: 'queue'` is what Enter does while an agent is running, so a busy conversation is not an error.
+
+**What `sent` means.** `sessionController.prompt` resolves when DSH accepts the prompt into the
+conversation's queue; it reports nothing about when the turn carrying it starts or finishes, and the
+services this plugin injects expose no per-turn event to wait for. `sent` therefore records
+acceptance — the last fact the plugin can observe — and the UI says **Accepted**, never Sent, Running
+or Completed. Two messages due at the same instant are both accepted and run one turn after the other,
+so the create and edit dialogs say so inline when another pending record targets the same conversation
+within `CONFLICT_WINDOW_MS` (120 s, `lib/core.js`). No status value was added: a record written by an
+earlier version keeps its stored status and still lists, edits and retries.
 
 ### 3.7 Lifecycle
 
@@ -252,6 +268,18 @@ overlays, so a portal is required, not cosmetic. It holds:
   *Next Monday 9:00 AM*;
 - `<input type="date">` with `min` = today in the browser zone, hour 1–12, minute in 5-minute steps,
   and an **AM / PM** segmented control;
+- a **New conversation / This conversation** control styled like AM / PM, landing on *New conversation*.
+  *New conversation* sends a `kind: 'new'` target built by `newConversationTarget` from the workspace
+  that owns the conversation, so it is the same target shape the editor persists; the conversation is
+  opened at delivery, exactly once, and reused on retry. *This conversation* is one click away and keeps
+  the v1 request byte-identical (`sessionId`) — that is now the deliberate choice rather than the
+  default. When the workspace cannot be named the option is disabled and the dialog says why — a path is
+  never guessed — and the control falls back to *This conversation*. Attachments switch the copy, not the
+  choice: a new conversation can carry images but not staged files, so picking it with attachments on
+  shows that limit before the Host refuses the create (`attachments-need-conversation`);
+- one quiet line when another pending message targets the same conversation within
+  `core.CONFLICT_WINDOW_MS`. It is informational: the primary action stays enabled, because a second
+  message simply queues behind the first turn;
 - a summary line, red when the selection is in the past or under 30 s away, and red for a wall clock
   a DST gap removed (that case is refused rather than shifted);
 - a **Repeat** checkbox with the frequency and a rule-specific note; the day-29–31 case notes that
@@ -296,8 +324,9 @@ a split view picks the conversation the user was last typing in.
 
 `conversation.input.dock` (order 30). Collapsed it shows the count and the next due time; expanded it
 lists rows with the preview, attachment icons, the time, and **Send now** / **Change time** /
-**Cancel** (cancel asks once inline). Failed rows show the stored reason and **Retry**; rows sent in
-the last 24 h are dimmed, with a tick and "sent late" when applicable. It refreshes on mount, after
+**Cancel** (cancel asks once inline). Failed rows show the stored reason and **Retry**; rows settled in
+the last 24 h are dimmed and read **accepted** (or **accepted late**) — the strip never claims the turn
+finished. It refreshes on mount, after
 each action, on window `focus`, and once about 2 s after the next due instant. No polling.
 
 ### 4.5 Styling and copy
@@ -319,7 +348,11 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
 | Empty draft | Button disabled; shortcut reports "Type a message first". |
 | File still uploading | `serializeDraftAttachments` throws → "Wait for uploads to finish"; draft kept. |
 | Attachment vanished | Same path, distinct message; nothing is scheduled. |
-| Agent running at due time | Delivered with `mode: 'queue'`, exactly like Enter. |
+| Agent running at due time | Delivered with `mode: 'queue'`, exactly like Enter. The record still reports acceptance, never a running state. |
+| Two messages to one conversation, same instant | Both are accepted and run one turn after the other. Create and edit say so inline; nothing is refused. |
+| A settled record | Reads **Accepted** (or **accepted late**). The plugin cannot observe the turn, so no row claims Sent, Running or Completed. |
+| New conversation with attached files | Refused at create time (`attachments-need-conversation`): a receipt belongs to the conversation that uploaded it. |
+| New conversation for a workspace that is gone | Refused at create time (`unknown-workspace`) instead of failing at the due instant. |
 | Conversation archived or deleted | `resolveAgent`/`prompt` fails → `failed` with the reason; Cancel still works. |
 | Model rejects images | `prompt` fails → `failed` with the host diagnostic. |
 | Two tabs act on one record | The Host serializes; the stale call gets `not-pending` and the UI refreshes. |
@@ -335,15 +368,15 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
 <a id="6-tests"></a>
 ## 6. Tests
 
-`npm test` (37 tests):
+`npm test` (87 tests):
 
-- `test/core.test.mjs` — 30 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
+- `test/core.test.mjs` — 62 tests. 12↔24-hour conversion including 12 AM/PM, a fixed-zone instant
   (09:00 in `Asia/Hong_Kong` → `01:00Z`), a round-trip across five zones and three dates, a DST gap
   refused, an ambiguous hour resolved, every validator rejection (past, <30 s, empty, >10 images,
   repeat with attachments, oversized text, bad zone, bad instant), RRULE text for all four
   frequencies including `DTSTART;TZID=`, `WKST`, `BYMONTHDAY`, nearest-due selection, timer chunking
   past 2^31−1, retention, the storage-unit-name pattern and the 120-character title summary.
-- `test/client.test.mjs` — 6 tests. The committed bundle equals a fresh build; both dictionaries
+- `test/client.test.mjs` — 24 tests. The committed bundle equals a fresh build; both dictionaries
   declare one key set; executing `client.js` through a `window.__ModuleLoader__` facade yields the
   documented plugin; `apply` registers exactly the button (`conversation.input.right`, order 900) and
   the strip (`conversation.input.dock`, order 30) and one shortcut with Alt+Enter on all six
@@ -351,7 +384,7 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
   registered button mounts with a fake input machine and is clickable exactly when `useInput`
   reports text or an attachment and the phase is `plain`; the bundle requires nothing outside the
   baseline table.
-- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 66 assertions against in-memory services:
+- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 239 assertions against in-memory services:
   the six routes, six refusals that write nothing, a text create/list/deliver round trip with the
   derived request id and queued mode, a failed delivery plus retry with the same id, send-now,
   cancel and `not-pending`/`not-found`, reschedule and the 30 s guard, crash recovery from
@@ -366,15 +399,16 @@ files exist, and that `lib/core.js` stays dependency-free.
 <a id="7-verification"></a>
 ## 7. Verification
 
-In 0.3.0, `npm test` reports **79 tests passing** (59 core, 19 client, 1 Host wrapper that runs
-206 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 206 assertions.
-The 0.2.x numbers were 32 tests: 26 core, 5 client, a 66-assertion Host wrapper.
+In 0.4.0, `npm test` reports **87 tests passing** (62 core, 24 client, 1 Host wrapper that runs
+239 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 239 assertions.
+The 0.3.1 numbers were 81 tests (60 core, 20 client, 206 assertions); 0.2.x was 32 tests (26 core,
+5 client, a 66-assertion Host wrapper).
 
 ### 7.1 Automated
 
 - `node --check` on all four JavaScript files; both JSON dictionaries and the patch YAML parse.
 - The bundle-freshness gate, the dictionary-parity gate and the `t('…')` key-coverage gate.
-- The Host end-to-end smoke test (66 assertions) described in [§6](#6-tests).
+- The Host end-to-end smoke test (239 assertions) described in [§6](#6-tests).
 
 ### 7.2 Live, on an isolated DSH 0.2.2-rc.2 instance
 

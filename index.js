@@ -74,6 +74,7 @@ const CODES = {
   invalidId: 'invalid-id',
   tooSoon: 'too-soon',
   unknownSession: 'unknown-session',
+  unknownWorkspace: 'unknown-workspace',
   unknownReceipt: 'unknown-receipt',
   unknownFile: 'unknown-file',
   repeatUnavailable: 'repeat-unavailable',
@@ -84,6 +85,7 @@ const CODES = {
   emptyBody: 'empty-body',
   bodyTooLarge: 'body-too-large',
   tooManyPending: 'too-many-pending',
+  attachmentsNeedConversation: 'attachments-need-conversation',
   internal: 'internal',
 }
 
@@ -557,12 +559,8 @@ class Scheduler {
   async ensureSession(record, table) {
     if (record.target.kind !== 'new' || record.sessionId !== undefined) return record
     const target = record.target
-    if (target.workspaceId !== undefined) {
-      const workspaces = await this.workspaces()
-      if (workspaces.length > 0 && !workspaces.some(workspace => workspace.id === target.workspaceId)) {
-        throw new Error('the workspace this message was addressed to no longer exists')
-      }
-    }
+    const missing = await missingWorkspace(this, target)
+    if (missing !== null) throw new Error(missing)
     // The two fields are exclusive on the wire: a named workspace already fixes
     // the directory, and cwd is only the fallback destination.
     const request = target.workspaceId === undefined ? { cwd: target.cwd } : { workspaceId: target.workspaceId }
@@ -649,6 +647,10 @@ class Scheduler {
         clientTimeZone: current.timeZone,
       }, signal)
       const settledMs = Date.now()
+      // DSH accepts the prompt into the conversation's queue and reports nothing
+      // about when the turn starts or finishes, so `sent` records acceptance —
+      // the last fact the plugin can observe. The UI calls that state Accepted
+      // and never claims the message was sent (docs/DETAIL.md §3.6).
       const sent = parseRecord({
         ...current,
         status: 'sent',
@@ -679,7 +681,10 @@ class Scheduler {
     const nowIso = new Date().toISOString()
     const record = parseRecord({
       id: randomUUID(),
-      target: { kind: 'session', sessionId: validated.sessionId },
+      // The validated destination is stored as it arrived: parseRecord mirrors a
+      // session target's id into sessionId, and a new-conversation target owns no
+      // session until delivery opens one.
+      target: validated.target,
       dueAt: validated.dueAt,
       timeZone: validated.timeZone,
       text: validated.text,
@@ -749,7 +754,29 @@ async function settleMutation(scheduler, id, change) {
 }
 
 /**
+ * Refuse a new-conversation target whose workspace is gone.
+ *
+ * A build without a workspace registry cannot answer, so the check stays
+ * best-effort there and the delivery is attempted as before.
+ * @param scheduler - owning store.
+ * @param target - one validated delivery target.
+ * @returns the reason it cannot be reached, or null when it still can.
+ */
+async function missingWorkspace(scheduler, target) {
+  if (target.kind !== 'new' || target.workspaceId === undefined) return null
+  const workspaces = await scheduler.workspaces()
+  if (workspaces.length === 0) return null
+  if (workspaces.some(workspace => workspace.id === target.workspaceId)) return null
+  return 'the workspace this message was addressed to no longer exists'
+}
+
+/**
  * Validate and commit one create request.
+ *
+ * A session target resolves its agent now, because the conversation exists. A
+ * new-conversation target does not: creating it here would leave an empty
+ * conversation behind every cancelled message, so the workspace is only checked
+ * and the conversation is opened at delivery time.
  * @param scheduler - owning store.
  * @param body - untrusted JSON body.
  */
@@ -757,19 +784,33 @@ async function handleCreate(scheduler, body) {
   const validated = validateCreateRequest(body, Date.now())
   if (validated.ok !== true) return jsonError(validated.code, validated.message)
   const request = validated.value
+  const target = request.target
 
   let agent
-  try {
-    const resolved = await scheduler.ctx.sessionController.resolveAgent(request.sessionId)
-    if (resolved === null || typeof resolved !== 'object' || 'error' in resolved) {
-      return jsonError(CODES.unknownSession, 'That conversation is no longer available; reopen it and try again.')
+  if (target.kind === 'session') {
+    try {
+      const resolved = await scheduler.ctx.sessionController.resolveAgent(request.sessionId)
+      if (resolved === null || typeof resolved !== 'object' || 'error' in resolved) {
+        return jsonError(CODES.unknownSession, 'That conversation is no longer available; reopen it and try again.')
+      }
+      agent = resolved.agent
+      if (agent === undefined) {
+        return jsonError(CODES.unknownSession, 'That conversation is no longer available; reopen it and try again.')
+      }
+    } catch (error) {
+      return jsonError(CODES.unknownSession, describeError(error))
     }
-    agent = resolved.agent
-    if (agent === undefined) {
-      return jsonError(CODES.unknownSession, 'That conversation is no longer available; reopen it and try again.')
+  } else {
+    // A destination that is already gone is a validation failure now, not a
+    // delivery failure left to rot until the due instant.
+    const missing = await missingWorkspace(scheduler, target)
+    if (missing !== null) return jsonError(CODES.unknownWorkspace, missing)
+    // A staged receipt belongs to the conversation that uploaded it, which is not
+    // the conversation this message will open.
+    if (request.fileReceipts.length > 0) {
+      return jsonError(CODES.attachmentsNeedConversation,
+        'Attached files need an existing conversation; send this message to this conversation instead.')
     }
-  } catch (error) {
-    return jsonError(CODES.unknownSession, describeError(error))
   }
 
   if (request.repeat !== null) {

@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   COMPATIBLE_VERSIONS,
+  CONFLICT_WINDOW_MS,
   DOMAIN_NAME,
   DOMAIN_VERSION,
   LATE_THRESHOLD_MS,
@@ -47,6 +48,7 @@ import {
   pendingSummary,
   pruneTargets,
   resolveSessionId,
+  sameConversationConflict,
   skipsShortMonths,
   sortPendingRecords,
   summariseTitle,
@@ -932,4 +934,103 @@ test('describeDue returns an empty string instead of throwing without an instant
   assert.equal(describeDue(Number.POSITIVE_INFINITY, 'en', 'Asia/Hong_Kong'), '')
   assert.equal(describeDue('not a date', 'en', 'Asia/Hong_Kong'), '')
   assert.ok(describeDue(Date.parse('2026-11-15T13:00:00.000Z'), 'en', 'Asia/Hong_Kong').length > 0)
+})
+
+const NEW_CONVERSATION = { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' }
+
+test('a create request names exactly one destination', () => {
+  const legacy = validateCreateRequest(baseRequest(), NOW)
+  assert.equal(legacy.ok, true)
+  assert.deepEqual(legacy.value.target, { kind: 'session', sessionId: 'session-a' })
+  assert.equal(legacy.value.sessionId, 'session-a', 'the v1 field is unchanged for an old client')
+
+  const explicit = validateCreateRequest(baseRequest({ sessionId: undefined, target: { kind: 'session', sessionId: 'session-b' } }), NOW)
+  assert.equal(explicit.ok, true)
+  assert.deepEqual(explicit.value.target, { kind: 'session', sessionId: 'session-b' })
+  assert.equal(explicit.value.sessionId, 'session-b', 'a session target still mirrors its id')
+
+  const fresh = validateCreateRequest(baseRequest({ sessionId: undefined, target: NEW_CONVERSATION }), NOW)
+  assert.equal(fresh.ok, true)
+  assert.deepEqual(fresh.value.target, { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' })
+  assert.equal('sessionId' in fresh.value, false, 'a new conversation has no session yet')
+
+  assert.equal(validateCreateRequest(baseRequest({ target: NEW_CONVERSATION }), NOW).code, 'invalid-request',
+    'both destinations are ambiguous')
+  assert.equal(validateCreateRequest(baseRequest({ sessionId: undefined }), NOW).code, 'invalid-session',
+    'neither destination is refused')
+  assert.equal(validateCreateRequest(baseRequest({ sessionId: undefined, target: { kind: 'new', cwd: 'relative' } }), NOW).code,
+    'invalid-target', 'a relative cwd never becomes a conversation')
+  assert.equal(validateCreateRequest(baseRequest({ sessionId: undefined, target: NEW_CONVERSATION, repeat: 'daily' }), NOW).code,
+    'repeat-with-new-conversation', 'a repeating task needs a conversation that exists')
+  assert.equal(validateCreateRequest(baseRequest({
+    sessionId: undefined,
+    target: NEW_CONVERSATION,
+    images: [{ mediaType: 'image/png', data: 'AAAA' }],
+  }), NOW).ok, true, 'a new conversation may still take an image')
+})
+
+/** One stored record as the tab would hold it. */
+function pendingAt(id, dueIso, extra = {}) {
+  return {
+    id,
+    status: 'pending',
+    target: { kind: 'session', sessionId: 'session-a' },
+    dueAt: dueIso,
+    ...extra,
+  }
+}
+
+test('two messages to one conversation conflict only when they are close', () => {
+  const due = new Date(NOW + 3_600_000).toISOString()
+  const candidate = { target: { kind: 'session', sessionId: 'session-a' }, dueAt: due }
+
+  assert.equal(CONFLICT_WINDOW_MS, 120_000, 'the window is two minutes')
+  assert.deepEqual(sameConversationConflict(candidate, []), [], 'nothing else scheduled, nothing to warn about')
+  assert.deepEqual(sameConversationConflict(candidate, undefined), [], 'no list, no warning')
+
+  assert.deepEqual(
+    sameConversationConflict(candidate, [pendingAt('a', due)]).map(record => record.id),
+    ['a'],
+    'the same instant conflicts',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('a', new Date(NOW + 3_600_000 + 120_000).toISOString())]).length,
+    1,
+    'two minutes apart is still inside the window',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('a', new Date(NOW + 3_600_000 + 180_000).toISOString())]).length,
+    0,
+    'three minutes apart does not warn',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('b', due, { target: { kind: 'session', sessionId: 'session-b' } })]).length,
+    0,
+    'another conversation queues independently',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('c', due, { target: { kind: 'new', cwd: 'C:/work/a' } })]).length,
+    0,
+    'a kind-new record never conflicts',
+  )
+  assert.deepEqual(
+    sameConversationConflict({ target: { kind: 'new', cwd: 'C:/work/a' }, dueAt: due }, [pendingAt('a', due)]),
+    [],
+    'a new conversation queues behind nothing',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('d', due, { status: 'sent' })]).length,
+    0,
+    'a settled record is no longer waiting',
+  )
+  assert.equal(
+    sameConversationConflict({ id: 'a', target: candidate.target, dueAt: due }, [pendingAt('a', due)]).length,
+    0,
+    'an editor does not warn about itself',
+  )
+  assert.equal(
+    sameConversationConflict(candidate, [pendingAt('e', 'not an instant'), null, 'nope']).length,
+    0,
+    'a record without an instant is ignored',
+  )
 })

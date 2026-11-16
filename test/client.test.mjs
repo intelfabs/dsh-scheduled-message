@@ -427,7 +427,7 @@ test('day groups follow the reader zone and put settled rows last', async () => 
   assert.equal(groups[0].rows[0].time, '9:00 AM')
   const settled = groups[4]
   assert.equal(settled.kind, 'sent')
-  assert.equal(settled.heading.key, 'panel.sent')
+  assert.equal(settled.heading.key, 'panel.accepted', 'a settled row claims acceptance, not sending')
   assert.equal(settled.rows[0].sent, true)
 })
 
@@ -615,7 +615,7 @@ test('every key the bundle asks for exists in both dictionaries', async () => {
     'repeat.daily', 'repeat.weekdays', 'repeat.weekly', 'repeat.monthly',
     'repeat.detail.daily', 'repeat.detail.weekdays', 'repeat.detail.weekly', 'repeat.detail.monthly',
     'weekday.mon', 'weekday.tue', 'weekday.wed', 'weekday.thu', 'weekday.fri', 'weekday.sat', 'weekday.sun',
-    'panel.waitingOne', 'panel.waitingMany', 'panel.sent',
+    'panel.waitingOne', 'panel.waitingMany', 'panel.accepted', 'dock.accepted', 'dock.acceptedLate',
   ]) used.add(key)
 
   assert.ok(used.size >= 100, 'the scan finds every literal key the bundle uses')
@@ -793,4 +793,74 @@ test('the scheduled flash belongs to one conversation and dies with the record',
   assert.equal(internals.toastFor('session-b'), null, 'another conversation never inherits the flash')
   internals.clearToast()
   assert.equal(internals.toastFor('session-a'), null, 'deleting the record drops the flash at once')
+})
+
+test('a settled record is reported as accepted, never as sent', async () => {
+  const internals = await loadInternals()
+  const en = JSON.parse(read('locale/en.json'))
+  const zh = JSON.parse(read('locale/zh.json'))
+
+  assert.equal(internals.settledLabelKey({ late: false }), 'dock.accepted')
+  assert.equal(internals.settledLabelKey({ late: true }), 'dock.acceptedLate')
+  assert.equal(internals.settledLabelKey(null), 'dock.accepted')
+  for (const key of ['dock.accepted', 'dock.acceptedLate', 'panel.accepted', 'panel.acceptedLate']) {
+    assert.ok(key in en, 'English declares ' + key)
+    assert.ok(key in zh, 'Chinese declares ' + key)
+  }
+  for (const gone of ['dock.sent', 'dock.sentLate', 'panel.sent', 'panel.sentLate']) {
+    assert.equal(gone in en, false, 'the completion claim ' + gone + ' is gone')
+    assert.equal(gone in zh, false, 'the completion claim ' + gone + ' is gone in Chinese')
+  }
+
+  // The trailing group keeps its 24 h window; only its claim changes.
+  const now = Date.parse('2026-11-15T08:00:00.000Z')
+  const groups = internals.buildGroups([
+    makeRecord({ id: 'f', status: 'sent', dueAt: '2026-11-14T09:00:00.000Z', sentAt: '2026-11-15T06:00:00.000Z' }),
+  ], now, UTC, 'en')
+  assert.equal(groups[0].kind, 'sent', 'the group is still the trailing one')
+  assert.equal(groups[0].heading.key, 'panel.accepted')
+  assert.notEqual(groups[0].heading.key, 'panel.sent')
+  // No label anywhere in the card model claims a completed turn.
+  const model = internals.cardModel(
+    makeRecord({ id: 'g', status: 'sent', dueAt: '2026-11-14T09:00:00.000Z', sentAt: '2026-11-15T06:00:00.000Z', late: true }),
+    UTC,
+    null,
+  )
+  assert.equal(model.sent, true, 'the record is settled')
+  assert.equal(model.sending, false)
+  assert.equal(model.late, true)
+})
+
+test('the compose dialog offers a new conversation only for a resolvable workspace', async () => {
+  const internals = await loadInternals()
+  const targets = {
+    workspaces: [
+      { id: 'ws-a', title: 'Workspace A', path: 'C:/work/a', sessions: [{ id: 'session-a' }, { id: 'session-b' }] },
+      { id: '', title: 'Nameless', path: 'C:/work/c', sessions: [{ id: 'session-c' }] },
+    ],
+  }
+
+  const own = internals.destinationChoices(targets, 'session-a')
+  assert.deepEqual(own.sessionTarget, { kind: 'session', sessionId: 'session-a' }, 'this conversation is always offered')
+  assert.deepEqual(own.newTarget, { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' },
+    'a new conversation reuses the editor target shape')
+  assert.equal(own.workspaceTitle, 'Workspace A')
+  assert.equal(own.unavailable, false)
+  assert.equal(own.defaultChoice, 'new', 'a new conversation is what the dialog lands on')
+
+  const unknown = internals.destinationChoices(targets, 'session-zzz')
+  assert.deepEqual(unknown.sessionTarget, { kind: 'session', sessionId: 'session-zzz' },
+    'the current conversation stays selectable')
+  assert.equal(unknown.newTarget, null, 'an unresolvable conversation never guesses a path')
+  assert.equal(unknown.unavailable, true)
+  assert.equal(unknown.defaultChoice, 'session', 'without a workspace the dialog falls back to this conversation')
+
+  const nameless = internals.destinationChoices(targets, 'session-c')
+  assert.equal(nameless.newTarget, null, 'a workspace without an id cannot be addressed')
+  assert.equal(nameless.unavailable, true)
+
+  const loading = internals.destinationChoices(null, 'session-a')
+  assert.equal(loading.newTarget, null)
+  assert.equal(loading.unavailable, true, 'an unloaded target list disables the option')
+  assert.equal(loading.defaultChoice, 'session', 'an unloaded target list does not promise a new conversation')
 })

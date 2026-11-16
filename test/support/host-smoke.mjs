@@ -995,6 +995,114 @@ export async function runHostSmoke() {
   equal(host.prompts.at(-1).content, [{ type: 'text', text: 'from v1' }], 'a v1 record delivers its text')
   equal(stored(host, legacyId).target, { kind: 'session', sessionId: 'session-a' }, 'the migrated record is written back as v2')
 
+  // 30. Two messages to one conversation at the same instant: both are accepted,
+  // in due order, each with its own request id.
+  const twinDue = new Date(Date.now() + 120_000).toISOString()
+  const twinA = await schedule(host, { text: 'twin a', dueAt: twinDue })
+  const twinB = await schedule(host, { text: 'twin b', dueAt: twinDue })
+  equal(twinA.created.ok, true, 'the first of two simultaneous messages is accepted')
+  equal(twinB.created.ok, true, 'the second one is accepted too')
+  equal(twinA.created.value.message.status, 'pending', 'the second one is not blocked by the first')
+  await makeDue(host, twinA.id)
+  await makeDue(host, twinB.id)
+  const twinsFrom = host.prompts.length
+  await fireWhenArmed(host)
+  await until(() => table.get(twinA.id)?.status === 'sent' && table.get(twinB.id)?.status === 'sent',
+    'both simultaneous messages to settle')
+  const twins = host.prompts.slice(twinsFrom)
+  equal(twins.length, 2, 'two queue prompts are delivered')
+  equal(twins.every(item => item.mode === 'queue'), true, 'both queue behind the conversation')
+  equal(new Set(twins.map(item => item.requestId)).size, 2, 'each delivery has its own request id')
+  equal(twins.map(item => item.content[0].text), ['twin a', 'twin b'], 'ties keep insertion order')
+
+  // 31. Exactly once: a settled record refuses every delivery route.
+  const settledFrom = host.prompts.length
+  equal((await body(created('/retry'), { body: { id: twinA.id } })).error?.code, 'not-pending',
+    'a delivered record cannot be retried')
+  equal((await body(created('/send-now'), { body: { id: twinA.id } })).error?.code, 'not-pending',
+    'a delivered record cannot be sent again')
+  equal(host.prompts.length, settledFrom, 'no second prompt is issued')
+  equal(host.prompts.filter(item => item.requestId === 'dsm-' + twinA.id).length, 1, 'one record is prompted once')
+
+  // 32. A running turn is neither waited on nor mistaken for a state change.
+  host.state.summaries = [{ sessionId: 'session-a', updatedAt: Date.now(), running: true, blank: false }]
+  const busyOne = await schedule(host, { text: 'while busy' })
+  await makeDue(host, busyOne.id)
+  const busyFrom = host.prompts.length
+  await fireWhenArmed(host)
+  await until(() => table.get(busyOne.id)?.status === 'sent', 'the message queued behind a running turn to settle')
+  equal(host.prompts.length, busyFrom + 1, 'it is delivered instead of being held back')
+  equal(host.prompts.at(-1).mode, 'queue', 'delivery queues behind the running turn')
+  equal(stored(host, busyOne.id).status, 'sent', 'the record reports acceptance, not a running state')
+  ok(!['running', 'started', 'completed'].includes(stored(host, busyOne.id).status), 'no invented status is written')
+  const runningTargets = await body(created('/targets'), {})
+  equal(runningTargets.value.workspaces.find(item => item.id === 'ws-a').sessions[0].running, true,
+    'the running flag the UI shows comes from the Session summary')
+  host.state.summaries = []
+
+  // 33. Create can address a new conversation without opening it.
+  const newTargetDue = new Date(Date.now() + 120_000).toISOString()
+  const createsAtCreate = host.state.createCalls.length
+  const born = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a', workspaceId: 'ws-a' },
+      dueAt: newTargetDue,
+      timeZone: 'Asia/Hong_Kong',
+      text: 'open later',
+    },
+  })
+  equal(born.ok, true, 'a create addressed to a new conversation is accepted')
+  equal(born.value.kind, 'once', 'it is a one-shot record')
+  equal(born.value.message.target.kind, 'new', 'the stored destination is a new conversation')
+  equal(born.value.message.sessionId, undefined, 'no conversation exists yet')
+  equal(host.state.createCalls.length, createsAtCreate, 'creating a record opens no conversation')
+  const bornId = born.value.message.id
+  await makeDue(host, bornId)
+  await fireWhenArmed(host)
+  await until(() => table.get(bornId)?.status === 'sent', 'the new-conversation message to settle')
+  equal(host.state.createCalls.length, createsAtCreate + 1, 'delivery opens exactly one conversation')
+  equal(host.state.createCalls.at(-1), { workspaceId: 'ws-a' }, 'the named workspace travels alone')
+  const bornSession = stored(host, bornId).sessionId
+  ok(typeof bornSession === 'string', 'the opened conversation is stored on the record')
+  equal(host.prompts.at(-1).sessionId, bornSession, 'the message lands in the conversation it opened')
+  equal(host.prompts.at(-1).requestId, 'dsm-' + bornId, 'the request id still comes from the record')
+  await table.put(bornId, { ...stored(host, bornId), status: 'failed', error: 'the turn refused it' })
+  await body(created('/retry'), { body: { id: bornId } })
+  await until(() => table.get(bornId)?.status === 'sent', 'the retried new-conversation delivery')
+  equal(host.state.createCalls.length, createsAtCreate + 1, 'the retry reuses the conversation')
+
+  // 34. A create body names one destination, and a dead one fails at create time.
+  const soon = new Date(Date.now() + 120_000).toISOString()
+  const bothDestinations = await body(created('/create'), {
+    body: { sessionId: 'session-a', target: { kind: 'session', sessionId: 'session-a' }, dueAt: soon, timeZone: 'UTC', text: 'x' },
+  })
+  equal(bothDestinations.error?.code, 'invalid-request', 'a body carrying both destinations is refused')
+  const noDestination = await body(created('/create'), { body: { dueAt: soon, timeZone: 'UTC', text: 'x' } })
+  equal(noDestination.error?.code, 'invalid-session', 'a body carrying neither is refused')
+  const relativeNew = await body(created('/create'), {
+    body: { target: { kind: 'new', cwd: 'relative/path' }, dueAt: soon, timeZone: 'UTC', text: 'x' },
+  })
+  equal(relativeNew.error?.code, 'invalid-target', 'a new conversation needs an absolute cwd')
+  const deadWorkspace = await body(created('/create'), {
+    body: { target: { kind: 'new', cwd: 'C:/gone', workspaceId: 'ws-gone' }, dueAt: soon, timeZone: 'UTC', text: 'x' },
+  })
+  equal(deadWorkspace.error?.code, 'unknown-workspace', 'a vanished workspace fails at create time, not at delivery')
+  const receiptForNew = await body(created('/create'), {
+    body: {
+      target: { kind: 'new', cwd: 'C:/work/a' },
+      dueAt: soon,
+      timeZone: 'UTC',
+      text: 'x',
+      fileReceipts: [host.stageFile('late.txt', 'bytes')],
+    },
+  })
+  equal(receiptForNew.error?.code, 'attachments-need-conversation',
+    'a staged file cannot follow a conversation that does not exist yet')
+  const repeatNew = await body(created('/create'), {
+    body: { target: { kind: 'new', cwd: 'C:/work/a' }, repeat: 'daily', dueAt: soon, timeZone: 'UTC', text: 'x' },
+  })
+  equal(repeatNew.error?.code, 'repeat-with-new-conversation', 'a repeating task needs an existing conversation')
+
   // 28. Without the Automation service, Repeat is refused instead of crashing.
   const soloHost = createHost({ withSchedule: false })
   apply(soloHost.ctx)

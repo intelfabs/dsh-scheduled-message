@@ -4,8 +4,8 @@
 
 Schedule the message you are already writing in the DSH composer — text, images and files — to be
 delivered later by the **Host**. Because the timer and the store live in the Host, closing the tab or
-the window does not cancel anything, and a message whose time passed while DSH was closed is sent at
-the next start and marked **sent late**.
+the window does not cancel anything, and a message whose time passed while DSH was closed is queued at
+the next start and marked **accepted late**.
 
 A **Scheduled** tab in the left sidebar then lists every scheduled message across all conversations,
 in time order, and lets you edit the time, the text, the attachments and the destination, move a
@@ -21,10 +21,11 @@ exactly their current meaning.
 |---|---|
 | **Schedule** button | Orange pill beside Send in the composer tool row. Disabled while the draft is empty or the composer is busy. |
 | **Alt+Enter** (Option+Enter on macOS) | Opens the same dialog. Registered as an editable-region shortcut, editable in Settings › Shortcuts. |
-| **Dialog** | Date, hour 1–12, minute, AM/PM, quick picks, a "Sends …" summary, and an optional **Repeat** row. Backdrop/Escape close, focus returns to the composer. |
+| **Dialog** | Date, hour 1–12, minute, AM/PM, quick picks, a destination that starts on **New conversation** (one click back to **This conversation**), a "Sends …" summary, and an optional **Repeat** row. Backdrop/Escape close, focus returns to the composer. |
 | **Scheduled tab** | Every scheduled message, across every conversation, grouped by day. Hover actions: **Send now**, **Edit**, **Delete**. Failed rows show the reason plus **Retry**. |
 | **Editor** | Change the time, the text, images and files, and the destination — an existing conversation or a new one that is created when the message is due. Saves detect concurrent edits instead of overwriting them. |
 | **Strip** | Above the composer: `2 scheduled · next Fri, 14 Nov, 9:00 am`, expandable to rows with **Send now**, **Change time**, **Cancel**, **Retry**, and a **View all** link to the tab. |
+| **Status** | A settled record reads **Accepted**. DSH reports when it queues a prompt, not when the turn that carries it starts or finishes, so nothing claims the message was sent. Two messages to one conversation close together say so inline. |
 | **Repeat** | Creates a task in DSH's own Automation service and opens its task page. Blocked when the draft has images or files. |
 | **Peak-price hint** | When the chosen time lands in DeepSeek's peak window and the session runs a DeepSeek model, the dialog adds one orange line naming the window in your own time zone. Weekends and off-peak hours are half price. |
 | **Phone** | Bottom sheet under 640 px, 44 px targets, 16 px inputs (no zoom-on-focus), safe-area padding. |
@@ -40,8 +41,8 @@ few days, then a full date. Grouping uses your browser zone, not the Host's.
   attachment chips — image thumbnails and file names with sizes. Hovering (or tapping, on a phone)
   reveals **Send now**, **Edit** and **Delete**; clicking the row opens the editor.
 - **Failed** rows carry a red rule and the delivery reason, with **Retry** and **Edit**.
-- **Sent** messages stay for 24 hours in a collapsed, dimmed group; a late one is labelled
-  **sent late**.
+- **Settled** messages stay for 24 hours in a collapsed, dimmed group and read **Accepted** — or
+  **accepted late** for one queued after its instant. The row never claims the turn finished.
 - **Repeating** messages are listed read-only with a link to **Automation tasks** — they belong to
   DSH's Automation service, which delivers text only.
 - **All / This workspace**: when a conversation is open, one small control narrows the list to that
@@ -146,6 +147,12 @@ or monthly on the chosen day. Monthly rules on the 29th–31st skip months that 
   shows the workspace name and a short conversation id unless the build exposes a title.
 - **No attachment deletion.** Removing a chip drops the reference to the stored file; the bytes
   follow DSH's own attachment retention, because this build has no delete API.
+- **No claim that a message was delivered.** DSH accepts a prompt into a conversation's queue and
+  says nothing about the turn behind it, so a settled record reads **Accepted** rather than Sent, and
+  no row ever says Running or Completed.
+- **No new conversation with attached files.** A staged file belongs to the conversation that uploaded
+  it, so a message addressed to a new conversation is refused at create time; send it to this
+  conversation instead.
 - **No cross-zone surprise.** The browser's IANA zone is captured at create time and only used for
   display and for the 12-hour reading; the Host stores one absolute instant.
 - **Disabling the plugin does not delete anything.** Pending records stay in storage and resume when
@@ -178,8 +185,17 @@ npm run check     # static gates
 
 ## Status
 
-`0.3.1`. 60 core tests, 20 client tests, one Host wrapper running 206 assertions, the static gates
-and the standalone Host smoke test (206 assertions) all pass.
+`0.4.0`. 62 core tests, 24 client tests, one Host wrapper running 239 assertions, the static gates
+and the standalone Host smoke test (239 assertions) all pass.
+
+0.4.0 makes the destination explicit and the status honest. The compose dialog now names where the
+message goes: **New conversation** by default — opened at send time, exactly once, reused on retry —
+or **This conversation**, one click away, which sends the same request an older client sends. A second
+message to one conversation within two minutes is called out inline instead of surprising you at the
+due instant. A settled record reads **Accepted**, because the queue is the last thing DSH tells this
+plugin about: it never learns when the turn behind a message starts or ends. The stored schema and
+every status value are unchanged, so records written by 0.3.0/0.3.1 keep working; the default
+destination is the one behaviour that changed, and *This conversation* is one click away.
 
 0.3.0 adds the **Scheduled** sidebar tab and its editor: every scheduled message in one list, with
 the time, the text, the attachments and the destination editable, moves between conversations,

@@ -393,7 +393,7 @@ through the `dsh-scheduled-message` namespace, and times are formatted with
   reports text or an attachment and the phase is `plain`; the create destination helper keeps the
   session form field-free, adds `sourceSessionId` only for a new target with staged files and never
   for an image-only draft; the bundle requires nothing outside the baseline table.
-- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 277 assertions against in-memory services:
+- `test/host.test.mjs` → `test/support/host-smoke.mjs` — 329 assertions against in-memory services:
   the six routes, six refusals that write nothing, a text create/list/deliver round trip with the
   derived request id and queued mode, a failed delivery plus retry with the same id, send-now,
   cancel and `not-pending`/`not-found`, reschedule and the 30 s guard, crash recovery from
@@ -412,16 +412,17 @@ files exist, and that `lib/core.js` stays dependency-free.
 <a id="7-verification"></a>
 ## 7. Verification
 
-In 0.4.1, `npm test` reports **90 tests passing** (64 core, 25 client, 1 Host wrapper that runs
-277 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 277 assertions.
-The 0.4.0 numbers were 87 tests (62 core, 24 client, 239 assertions); 0.3.1 was 81 (60 core, 20 client,
-206 assertions); 0.2.x was 32 (26 core, 5 client, a 66-assertion Host wrapper).
+In 0.5.0, `npm test` reports **95 tests passing** (65 core, 29 client, 1 Host wrapper that runs
+329 assertions), `npm run check` passes, and `node test/support/host-smoke.mjs` reports 329 assertions.
+The 0.4.1 numbers were 90 tests (64 core, 25 client, 277 assertions); 0.4.0 was 87 (62 core, 24 client,
+239 assertions); 0.3.1 was 81 (60 core, 20 client, 206 assertions); 0.2.x was 32 (26 core, 5 client, a
+66-assertion Host wrapper).
 
 ### 7.1 Automated
 
 - `node --check` on all four JavaScript files; both JSON dictionaries and the patch YAML parse.
 - The bundle-freshness gate, the dictionary-parity gate and the `t('…')` key-coverage gate.
-- The Host end-to-end smoke test (277 assertions) described in [§6](#6-tests).
+- The Host end-to-end smoke test (329 assertions) described in [§6](#6-tests).
 
 ### 7.2 Live, on an isolated DSH 0.2.2-rc.2 instance
 
@@ -564,20 +565,31 @@ interface ScheduledMessageRecordV2 {
 
 ### 9.3 Routes
 
-Thirteen, all under `/api/dsh-scheduled-message`, owner-only, all answering HTTP 200 with
+Fourteen, all under `/api/dsh-scheduled-message`, owner-only, all answering HTTP 200 with
 `{ok:true,value}` or `{ok:false,error:{code,message}}` (only `/thumb` answers a real 404, because the
 browser loads it as an image).
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/create`, `/list`, `/cancel`, `/reschedule`, `/send-now`, `/retry` | as v1 | the composer strip is unchanged; `/list` now selects by the *resolved* session, so a moved record leaves the old strip |
-| `/list-all` | GET | every message the tab shows, `scope=all\|workspace&workspaceId=`; day grouping stays in the browser |
+| `/list-all` | GET | every message the tab shows, `scope=all\|workspace&workspaceId=`, plus `finished` (what Clear history would delete); day grouping stays in the browser |
 | `/get` | GET | one record for the editor, whatever its status |
 | `/update` | POST | merge time/text/target/attachments under `expectedUpdatedAt`; `conflict`, `not-pending`, `empty`, `unknown-file` |
 | `/upload` | POST | raw body → `ctx.attachments.saveFileStream` → `{fileId,name,bytes}`, staged 24 h / 200 files |
 | `/thumb` | GET | one stored image's bytes, `cache-control: private, max-age=3600` |
 | `/targets` | GET | workspaces with their non-archived conversations, newest first |
 | `/repeating` | GET | session-targeted Automation tasks, read-only; `available:false` when the service is absent |
+| `/clear-history` | POST | delete every settled record (accepted or cancelled) in the same `scope=all\|workspace&workspaceId=` the list is showing, and answer `{removed}`; waiting, crash-left, failed and repeat work is never touched |
+
+Clear history deletes list entries, nothing else. `historyTargets` in `lib/core.js` selects only
+`sent` and `cancelled` records, the handler deletes those ids under the delivery lock and no timer is
+re-armed because a settled record never held one. A conversation keeps every message it already
+received, an Automation task is a rule in another service, and a waiting, `sending` or failed record
+keeps its row — so clearing the tab can neither cancel a delivery nor hide work that still needs
+attention. The button follows the `finished` count `/list-all` reports, so it also appears for settled
+entries the 24 h window keeps off the list — the rows a user most wants to clear. It asks through the
+same blocking `alertdialog` the editor uses, reports the Host's own `removed` count, and clears only
+the scope the filter is showing, so `scopeQuery` feeds both endpoints.
 
 ### 9.4 Delivery into a new conversation
 
@@ -603,9 +615,21 @@ one, and the repeated request id is refused by the Session inbox.
 
 ### 9.6 Verification status for v2
 
-All automated gates pass: 64 core tests, 25 client tests, the Host wrapper (277 assertions), the
-static gates in `scripts/check.mjs`, and `test/support/host-smoke.mjs` (277 assertions, including a v1
-record opening under the v2 schema and a `kind:'new'` delivery that creates exactly one session).
+All automated gates pass: 65 core tests, 29 client tests, the Host wrapper (329 assertions), the
+static gates in `scripts/check.mjs`, and `test/support/host-smoke.mjs` (329 assertions, including a v1
+record opening under the v2 schema, a `kind:'new'` delivery that creates exactly one session, and
+`/clear-history` removing only settled rows in the selected scope).
+
+Clear history was also checked against a real Host, not only a stand-in. A throwaway `web` profile
+under a temporary `DSH_HOME` was booted with the built package, seeded with a copy of the live store
+(12 settled rows) plus one waiting and one failed record. `GET /list-all` answered
+`finished:12` with 6 rows listed, the served bundle carried the button class and its copy,
+`POST /clear-history?scope=all` answered `{removed:12}`, the store afterwards held exactly the two
+unfinished records, and the live profile's own data was never opened (its file mtime was unchanged).
+Two deployment facts came out of that run and are worth remembering: the profile loads a *copy* of
+the package, so a rebuild here is invisible until it is copied there, and the Host half registers its
+routes at boot, so a page refresh alone serves the new bundle while the old routes keep answering
+`404` until DSH is fully restarted. The tab now names that case instead of showing a generic error.
 
 The tab was rendered in the live desktop GUI straight after the build: the sidebar entry, the page
 and its day groups appeared. Opening a message then blanked the panel, and the cause was the
@@ -621,11 +645,14 @@ against a real workspace list, and the phone layout on a real device.
 
 - `test/core.test.mjs` — migration v1→v2 and its idempotence, `parseRecord` rejections, monotonic
   `updatedAt`, both target kinds, every validation code, `nothing-to-update`, day labels across a
-  midnight boundary and a DST transition, group ordering, the 24 h sent window, pending counts.
+  midnight boundary and a DST transition, group ordering, the 24 h sent window, pending counts, and
+  the clear-history selection (settled rows of any age, never waiting, sending or failed ones).
 - `test/client.test.mjs` — bundle freshness, dictionary parity and key coverage, both panel
   registrations, icon/badge, grouping and headings, card model, destinations, `buildUpdate`, the
-  workspace→filter resolution and its scope URLs, repeating-group visibility.
+  workspace→filter resolution and its scope URLs, repeating-group visibility, the bundled
+  clear-history decision.
 - `test/host.test.mjs` + `test/support/host-smoke.mjs` — `/list-all` order and scope, `/get`, `/update`
   happy path + `conflict` + `not-pending` + `unknown-file` + empty-after-removal, `/upload` staging and
   pruning, `/targets`, `/repeating` availability and filtering, `kind:'new'` delivery including the
-  crash-after-creation cycle.
+  crash-after-creation cycle, and `/clear-history` deleting only the settled rows while a waiting
+  message keeps its instant, a failed one keeps its Retry and a crash-left `sending` record survives.

@@ -431,6 +431,82 @@ test('day groups follow the reader zone and put settled rows last', async () => 
   assert.equal(settled.rows[0].sent, true)
 })
 
+test('the cleared notice reports the count the Host answered', () => {
+  const en = translate(JSON.parse(read('locale/en.json')))
+  const zh = translate(JSON.parse(read('locale/zh.json')))
+  assert.equal(en('panel.noticeClearedOne', { count: 1 }), 'Cleared 1 finished entry')
+  assert.equal(en('panel.noticeClearedMany', { count: 7 }), 'Cleared 7 finished entries')
+  assert.equal(zh('panel.noticeClearedOne', { count: 1 }), '已清除 1 条完成记录')
+  assert.equal(zh('panel.noticeClearedMany', { count: 7 }), '已清除 7 条完成记录')
+})
+
+test('the tab offers Clear history for finished entries the list no longer shows', async () => {
+  const internals = await loadInternals()
+  const t = translate(JSON.parse(read('locale/en.json')))
+  const store = internals.allState
+  const snapshot = { ...store }
+
+  /** Depth-first search for the header button, whatever it is nested under. */
+  const findClearButton = (node) => {
+    if (node === null || typeof node !== 'object') return null
+    if (node.props !== undefined && node.props.className === 'dsm-page-clear') return node
+    for (const child of Array.isArray(node.children) ? node.children : []) {
+      const hit = findClearButton(child)
+      if (hit !== null) return hit
+    }
+    return null
+  }
+
+  try {
+    // The settled rows are older than the 24 h window, so the list itself holds
+    // only a waiting row: the Host count is the only signal that history exists.
+    Object.assign(store, {
+      loaded: true,
+      error: null,
+      items: [makeRecord({ id: 'waiting', dueAt: '2026-11-19T09:00:00.000Z' })],
+      finished: 3,
+    })
+    const button = findClearButton(internals.ScheduledPage({ t }))
+    assert.ok(button !== null, 'the page header renders a Clear history button')
+    assert.deepEqual(button.children, ['Clear history'])
+    assert.equal(button.props.type, 'button')
+    assert.equal(button.props.disabled, false)
+
+    Object.assign(store, { finished: 0, items: [] })
+    assert.equal(findClearButton(internals.ScheduledPage({ t })), null,
+      'nothing finished means no button')
+  } finally {
+    Object.assign(store, snapshot)
+  }
+})
+
+test('clearing history uses the same scope as the list it sits on', async () => {
+  const internals = await loadInternals()
+  assert.equal(internals.clearHistoryUrl(null), '/api/dsh-scheduled-message/clear-history?scope=all')
+  assert.equal(internals.clearHistoryUrl({ kind: 'all' }), '/api/dsh-scheduled-message/clear-history?scope=all')
+  assert.equal(
+    internals.clearHistoryUrl({ kind: 'workspace', workspaceId: 'ws a' }),
+    '/api/dsh-scheduled-message/clear-history?scope=workspace&workspaceId=ws%20a',
+    'a filtered page clears only that workspace, with the id encoded',
+  )
+  assert.equal(internals.clearHistoryUrl({ kind: 'workspace' }),
+    '/api/dsh-scheduled-message/clear-history?scope=all',
+    'a workspace scope without an id falls back to everything')
+})
+
+test('clearing history never targets a message that still needs attention', async () => {
+  const internals = await loadInternals()
+  const records = [
+    makeRecord({ id: 'sent', status: 'sent', sentAt: '2026-11-15T06:00:00.000Z' }),
+    makeRecord({ id: 'cancelled', status: 'cancelled' }),
+    makeRecord({ id: 'pending' }),
+    makeRecord({ id: 'failed', status: 'failed', error: 'Target conversation is archived.' }),
+  ]
+  assert.deepEqual(internals.historyTargets(records), ['sent', 'cancelled'],
+    'only settled rows are cleared')
+  assert.deepEqual(internals.historyTargets([]), [])
+})
+
 test('a card summarises its record in the browser clock', async () => {
   const internals = await loadInternals()
   const model = internals.cardModel(makeRecord({

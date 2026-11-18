@@ -24,6 +24,7 @@ const ROUTES = [
   [PREFIX + '/create', 'POST', 'streaming'],
   [PREFIX + '/list', 'GET', 'buffered'],
   [PREFIX + '/list-all', 'GET', 'buffered'],
+  [PREFIX + '/clear-history', 'POST', 'buffered'],
   [PREFIX + '/get', 'GET', 'buffered'],
   [PREFIX + '/update', 'POST', 'streaming'],
   [PREFIX + '/upload', 'POST', 'streaming'],
@@ -468,7 +469,7 @@ export async function runHostSmoke() {
   apply(host.ctx)
 
   // 1. Routes.
-  equal([...host.routes.keys()].sort(), ROUTES.map(([path]) => path).sort(), 'the Host owns exactly thirteen routes')
+  equal([...host.routes.keys()].sort(), ROUTES.map(([path]) => path).sort(), 'the Host owns exactly fourteen routes')
   for (const [path, method, mode] of ROUTES) {
     const route = routeOf(host.routes, path)
     ok(route.methods.includes(method), path + ' accepts ' + method)
@@ -717,6 +718,7 @@ export async function runHostSmoke() {
   equal(dues, [...dues].sort((left, right) => left - right), 'list-all is ordered by dueAt ascending')
   ok(listed2.value.items.some(item => item.status === 'cancelled'), 'a cancelled record inside the window is listed')
   ok(listed2.value.items.some(item => item.status === 'sent'), 'a sent record inside the window is listed')
+  ok(Number.isInteger(listed2.value.finished), 'list-all reports how many finished entries the store holds')
   ok(listed2.value.items.every(item => item.target.kind === 'session' || item.target.kind === 'new'), 'every row carries a target')
   equal((await body(created('/list-all'), { query: '?scope=nope' })).error?.code, 'invalid-request', 'an unknown scope is refused')
   equal((await body(created('/list-all'), { query: '?scope=workspace' })).error?.code, 'invalid-request', 'scope=workspace needs a workspaceId')
@@ -734,6 +736,7 @@ export async function runHostSmoke() {
   ok(!aged.value.items.some(item => item.id === first.id), 'a sent record older than 24 h leaves the tab')
   const agedGet = await body(created('/get'), { query: '?id=' + first.id })
   equal(agedGet.value.message.id, first.id, '/get still returns an aged record')
+  ok(aged.value.finished > 0, 'a settled record outside the 24 h window still counts as finished')
 
   // 16. /update merges, refuses staleness and re-validates the result.
   const updateRoute = created('/update')
@@ -1293,6 +1296,153 @@ export async function runHostSmoke() {
   equal(noTargets.value.workspaces, [], '/targets names no workspace without a registry')
   const noLabels = await schedule(registrylessHost, { text: 'no registry' })
   equal(noLabels.created.ok, true, 'a message can still be scheduled without a registry')
+
+  // 30. /clear-history drops finished entries and nothing else.
+  const clearHost = createHost()
+  apply(clearHost.ctx)
+  await until(() => clearHost.storageDomain.opened.length > 0, 'the clear-history Host domain to open')
+  const clearTable = tableOf(clearHost)
+  const clearRoute = routeOf(clearHost.routes, PREFIX + '/clear-history')
+  const clearSettled = await schedule(clearHost, { text: 'settled' })
+  const clearDropped = await schedule(clearHost, { text: 'dropped' })
+  const clearWaiting = await schedule(clearHost, { text: 'waiting' })
+  const clearFailed = await schedule(clearHost, { text: 'failed' })
+  const clearCrashed = await schedule(clearHost, { text: 'crashed' })
+  const waitingBefore = clearTable.get(clearWaiting.id)
+  await clearTable.put(clearSettled.id, { ...clearTable.get(clearSettled.id), status: 'sent', sentAt: new Date().toISOString() })
+  await clearTable.put(clearDropped.id, { ...clearTable.get(clearDropped.id), status: 'cancelled' })
+  await clearTable.put(clearFailed.id, { ...clearTable.get(clearFailed.id), status: 'failed', error: 'delivery failed' })
+  await clearTable.put(clearCrashed.id, { ...clearTable.get(clearCrashed.id), status: 'sending' })
+
+  const clearListRoute = routeOf(clearHost.routes, PREFIX + '/list-all')
+  const beforeClear = await body(clearListRoute, { query: '?scope=all' })
+  equal(beforeClear.value.finished, 2, '/list-all counts exactly what Clear history would delete')
+  ok(beforeClear.value.items.length >= 2, 'the finished rows are also listed inside the 24 h window')
+  equal((await body(clearRoute, { query: '?scope=nope', body: {} })).error?.code, 'invalid-request',
+    'an unknown scope is refused by /clear-history')
+  equal((await body(clearRoute, { query: '?scope=workspace&workspaceId=ws-missing', body: {} })).value,
+    { removed: 0 }, 'a scope with no finished entry removes nothing')
+  equal(clearTable.size, 5, 'a refused or empty clear writes nothing')
+
+  const cleared = await body(clearRoute, { body: {} })
+  equal(cleared.ok, true, '/clear-history answers an envelope')
+  equal(cleared.value, { removed: 2 }, 'only the settled entries are removed')
+  equal(clearTable.get(clearSettled.id), undefined, 'an accepted entry is deleted from the list')
+  equal(clearTable.get(clearDropped.id), undefined, 'a cancelled entry is deleted from the list')
+  equal(clearTable.get(clearWaiting.id).status, 'pending', 'a waiting message survives untouched')
+  equal(clearTable.get(clearWaiting.id).dueAt, waitingBefore.dueAt, 'a waiting message keeps its instant')
+  equal(clearTable.get(clearFailed.id).status, 'failed', 'a failed message stays for Retry')
+  equal(clearTable.get(clearCrashed.id).status, 'sending', 'a crash-left sending record stays unresolved')
+  const clearedAgain = await body(clearRoute, { body: {} })
+  equal(clearedAgain.value, { removed: 0 }, 'a second clear removes nothing')
+  equal(clearTable.size, 3, 'only the three unfinished records remain in the store')
+  const afterClear = await body(clearListRoute, { query: '?scope=all' })
+  equal(afterClear.value.finished, 0, 'the tab stops offering Clear history once nothing is finished')
+  equal(afterClear.value.items.length, 3, 'the list still shows the three unfinished rows')
+  equal((await body(clearRoute, { query: '?scope=workspace&workspaceId=ws-a', body: {} })).value,
+    { removed: 0 }, 'a workspace scope answers with that scope count')
+
+  // 31. The six behaviours a user checks by hand before a release.
+  const checkHost = createHost()
+  apply(checkHost.ctx)
+  await until(() => checkHost.storageDomain.opened.length > 0, 'the checklist Host domain to open')
+  const checkTable = tableOf(checkHost)
+  const checkRoute = (path) => routeOf(checkHost.routes, PREFIX + path)
+  const listAllIn = async (query) => (await body(checkRoute('/list-all'), { query })).value
+  const clearIn = async (query) => (await body(checkRoute('/clear-history'), { query, body: {} })).value
+
+  // 31a. All scope: the accepted/cancelled rows leave, the waiting and failed ones stay.
+  const clSentA = await schedule(checkHost, { text: 'accepted in A' })
+  const clSentB = await schedule(checkHost, { text: 'accepted in B', sessionId: 'session-c' })
+  const clWaiting = await schedule(checkHost, { text: 'still waiting' })
+  const clFailing = await schedule(checkHost, { text: 'fails once', duePast: true })
+  const clDoomed = await schedule(checkHost, { text: 'cancelled before clearing' })
+  checkHost.state.promptError = Object.assign(new Error('the agent refused'), { code: 'session/refused' })
+  await fireWhenArmed(checkHost)
+  await until(() => checkTable.get(clFailing.id)?.status === 'failed', 'the checklist failure to be stored')
+  await body(checkRoute('/cancel'), { body: { id: clDoomed.id } })
+  await body(checkRoute('/send-now'), { body: { id: clSentA.id } })
+  await body(checkRoute('/send-now'), { body: { id: clSentB.id } })
+  const waitingDueAt = checkTable.get(clWaiting.id).dueAt
+  const promptsBeforeClear = checkHost.prompts.length
+
+  const clBefore = await listAllIn('?scope=all')
+  equal(clBefore.finished, 3, 'two accepted rows and one cancelled row are offered')
+  ok(clBefore.items.some(row => row.status === 'cancelled'), 'the cancelled row is listed before the clear')
+  const clCleared = await clearIn('?scope=all')
+  equal(clCleared, { removed: 3 }, 'All scope removes exactly the finished rows')
+  const clAfter = await listAllIn('?scope=all')
+  equal(clAfter.finished, 0, 'nothing finished is left to offer')
+  equal(clAfter.items.filter(row => row.status === 'sent' || row.status === 'cancelled'), [],
+    'no accepted or cancelled row is left in the list')
+  ok(!clAfter.items.some(row => row.id === clDoomed.id), 'a cancelled row leaves the list on clear')
+  equal(checkTable.get(clWaiting.id).status, 'pending', 'the waiting record survives the clear')
+  equal(checkTable.get(clWaiting.id).dueAt, waitingDueAt, 'the waiting record keeps its instant')
+  equal(checkTable.get(clFailing.id).status, 'failed', 'the failed record survives the clear')
+  equal(checkHost.prompts.length, promptsBeforeClear, 'clearing history never re-opens a conversation')
+
+  // 31b. The waiting record still fires at its instant, and the offer comes back.
+  await makeDue(checkHost, clWaiting.id)
+  await fireWhenArmed(checkHost)
+  await until(() => checkTable.get(clWaiting.id)?.status === 'sent', 'the waiting record to fire after a clear')
+  equal(checkHost.prompts.at(-1).requestId, 'dsm-' + clWaiting.id, 'the delivery is the waiting record')
+  const clBack = await listAllIn('?scope=all')
+  equal(clBack.finished, 1, 'a settled delivery offers Clear history again')
+  await clearIn('?scope=all')
+
+  // 31c. This workspace: only that workspace's finished rows go.
+  const clWsA = await schedule(checkHost, { text: 'accepted in workspace A' })
+  const clWsB = await schedule(checkHost, { text: 'accepted in workspace B', sessionId: 'session-c' })
+  await body(checkRoute('/send-now'), { body: { id: clWsA.id } })
+  await body(checkRoute('/send-now'), { body: { id: clWsB.id } })
+  equal((await body(checkRoute('/list-all'), { query: '?scope=workspace&workspaceId=ws-a' })).value.finished, 1,
+    'workspace A offers its own finished row')
+  equal(await clearIn('?scope=workspace&workspaceId=ws-a'), { removed: 1 },
+    'the workspace scope removes only its own finished row')
+  equal(checkTable.get(clWsA.id), undefined, 'the workspace A row is deleted')
+  ok(checkTable.get(clWsB.id) !== undefined, 'the workspace B row is untouched')
+  equal((await body(checkRoute('/list-all'), { query: '?scope=workspace&workspaceId=ws-b' })).value.finished, 1,
+    'workspace B still offers its row')
+  equal((await listAllIn('?scope=all')).finished, 1, 'All scope counts only the untouched row')
+  await clearIn('?scope=all')
+
+  // 31d. A failed record keeps its Retry, and Retry still settles it.
+  equal(checkTable.get(clFailing.id).status, 'failed', 'the failed record is still failed after a clear')
+  const clRetried = await body(checkRoute('/retry'), { body: { id: clFailing.id } })
+  equal(clRetried.ok, true, 'a failed record still retries after a clear')
+  await until(() => checkTable.get(clFailing.id)?.status === 'sent', 'the retry to settle')
+  equal((await listAllIn('?scope=all')).finished, 1, 'the retried delivery is offered for clearing')
+  await clearIn('?scope=all')
+
+  // 31e. Repeating tasks are another service; clearing never reads or writes them.
+  checkHost.state.scheduleListValue = {
+    items: [
+      { id: 'schedule-1', title: 'daily standup', targetSessionId: 'session-a', rrule: 'FREQ=DAILY' },
+      { id: 'schedule-2', title: 'weekly review', targetSessionId: 'session-a', rrule: 'FREQ=WEEKLY' },
+    ],
+    shown: 2, total: 2, limit: 100, offset: 0,
+  }
+  const listCallsBefore = checkHost.state.scheduleListCalls.length
+  const tasksBefore = checkHost.state.scheduleTasks.length
+  const clSortBefore = await body(checkRoute('/repeating'), {})
+  const clRepeatSettled = await schedule(checkHost, { text: 'accepted next to a repeat' })
+  await body(checkRoute('/send-now'), { body: { id: clRepeatSettled.id } })
+  equal(await clearIn('?scope=all'), { removed: 1 }, 'clearing works with repeating tasks present')
+  const clSortAfter = await body(checkRoute('/repeating'), {})
+  equal(clSortAfter.value, clSortBefore.value, 'the repeating list is unchanged by clearing')
+  equal(checkHost.state.scheduleTasks.length, tasksBefore, 'clearing creates or removes no Automation task')
+  equal(checkHost.state.scheduleListCalls.length, listCallsBefore + 2,
+    'the schedule service was only read by the two /repeating calls')
+
+  // 31f. Cancel, then clear: the cancelled row leaves and the pending ones stay.
+  const clPending = await schedule(checkHost, { text: 'keeps waiting' })
+  const clCancelMe = await schedule(checkHost, { text: 'cancel then clear' })
+  await body(checkRoute('/cancel'), { body: { id: clCancelMe.id } })
+  equal((await listAllIn('?scope=all')).finished, 1, 'the cancelled row is offered')
+  equal(await clearIn('?scope=all'), { removed: 1 }, 'the cancelled row is removed')
+  equal(checkTable.get(clCancelMe.id), undefined, 'the cancelled row is gone from the store')
+  equal(checkTable.get(clPending.id).status, 'pending', 'the pending row is untouched')
+  ok(!(await listAllIn('?scope=all')).items.some(row => row.id === clCancelMe.id), 'it left the list too')
 
   active = undefined
   return { assertions }

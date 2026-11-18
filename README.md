@@ -43,6 +43,11 @@ few days, then a full date. Grouping uses your browser zone, not the Host's.
 - **Failed** rows carry a red rule and the delivery reason, with **Retry** and **Edit**.
 - **Settled** messages stay for 24 hours in a collapsed, dimmed group and read **Accepted** — or
   **accepted late** for one queued after its instant. The row never claims the turn finished.
+- **Clear history** sits at the right of the header whenever the plugin still holds a finished entry
+  — including accepted and cancelled rows the 24-hour window keeps off the list. It asks once, then
+  removes them (under **This workspace**, only that workspace's rows). Messages still waiting, failed
+  messages and **Repeating** tasks keep their places, and the conversations that already received a
+  message are untouched — nothing is deleted from a session.
 - **Repeating** messages are listed read-only with a link to **Automation tasks** — they belong to
   DSH's Automation service, which delivers text only.
 - **All / This workspace**: when a conversation is open, one small control narrows the list to that
@@ -158,7 +163,7 @@ or monthly on the chosen day. Monthly rules on the 29th–31st skip months that 
 ## Layout
 
 ```
-index.js              Host half: durable store, thirteen /api routes, timer, delivery
+index.js              Host half: durable store, fourteen /api routes, timer, delivery
 client.js             browser bundle (generated — see scripts/build-client.mjs)
 client.src.js         browser half source: composer button, dialog, strip, Scheduled tab, editor
 lib/core.js           dependency-free shared logic: 12-hour clock, zone resolution, validation,
@@ -182,8 +187,18 @@ npm run check     # static gates
 
 ## Status
 
-`0.4.1`. 64 core tests, 25 client tests, one Host wrapper running 277 assertions, the static gates
-and the standalone Host smoke test (277 assertions) all pass.
+`0.5.0`. 65 core tests, 29 client tests, one Host wrapper running 329 assertions, the static gates
+and the standalone Host smoke test (329 assertions) all pass.
+
+0.5.0 adds **Clear history** to the Scheduled tab. One button in the header removes the finished rows —
+accepted and cancelled — after a blocking confirmation that spells out exactly what stays. A message
+still waiting keeps its instant, a failed message keeps its **Retry**, a crash-left `sending` record
+stays visible, and **Repeating** tasks are untouched. Conversations keep every message they already
+received, because the button deletes list entries in the plugin's own store and never a session. The
+command is one new Host route, `POST /clear-history`, and the selection rule lives in `lib/core.js`
+so the tab and the Host agree on what finished means. The button was then pressed in the running
+desktop app: it cleared the finished rows in one go and left the waiting, failed and repeat entries
+alone ([docs/DETAIL.md](docs/DETAIL.md#9-6-verification-status-for-v2)).
 
 0.4.1 lets a message scheduled to **New conversation** carry attached files. The browser's upload
 receipt is memory-only and belongs to the composer's conversation, so the create request now names

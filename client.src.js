@@ -177,7 +177,7 @@ export function createClientPlugin(require) {
    */
   let allVersion = 0
   const allListeners = new Set()
-  const allState = { items: [], nowMs: 0, loading: false, loaded: false, error: null }
+  const allState = { items: [], nowMs: 0, loading: false, loaded: false, error: null, finished: 0 }
   let allInFlight = null
   let allRequestSeq = 0
   let allScope = { kind: 'all' }
@@ -231,13 +231,28 @@ export function createClientPlugin(require) {
     }, wait)
   }
 
-  /** The `/list-all` URL for one scope, so the header control and the URL agree. */
-  function listAllUrl(scope) {
+  /**
+   * The scope query both `/list-all` and `/clear-history` take.
+   *
+   * The header control, the list and the Clear history command read this one
+   * value, so a filtered page never clears a row it is not showing.
+   */
+  function scopeQuery(scope) {
     const value = scope === null || scope === undefined ? { kind: 'all' } : scope
     if (value.kind === 'workspace' && typeof value.workspaceId === 'string' && value.workspaceId.length > 0) {
-      return API + '/list-all?scope=workspace&workspaceId=' + encodeURIComponent(value.workspaceId)
+      return '?scope=workspace&workspaceId=' + encodeURIComponent(value.workspaceId)
     }
-    return API + '/list-all?scope=all'
+    return '?scope=all'
+  }
+
+  /** The `/list-all` URL for one scope, so the header control and the URL agree. */
+  function listAllUrl(scope) {
+    return API + '/list-all' + scopeQuery(scope)
+  }
+
+  /** The `/clear-history` URL for the same scope the list is showing. */
+  function clearHistoryUrl(scope) {
+    return API + '/clear-history' + scopeQuery(scope)
   }
 
   /**
@@ -254,9 +269,16 @@ export function createClientPlugin(require) {
     emitAll({ loading: true })
     const promise = requestJson(listAllUrl(scope), { method: 'GET' }).then((value) => {
       const items = Array.isArray(value?.items) ? value.items : []
+      // The Host reports how many finished entries it still holds, including the
+      // ones the 24 h window keeps out of `items`. Clear history removes all of
+      // them, so the button follows that number, not the visible rows.
+      const finished = Number.isFinite(value?.finished) && value.finished > 0
+        ? Math.trunc(value.finished)
+        : core.historyTargets(items).length
       if (seq === allRequestSeq) {
         emitAll({
           items,
+          finished,
           nowMs: Number.isFinite(value?.now) ? value.now : Date.now(),
           loading: false,
           loaded: true,
@@ -1933,6 +1955,8 @@ export function createClientPlugin(require) {
     const [editing, setEditing] = useState(null)
     const [notice, setNotice] = useState(null)
     const [sentOpen, setSentOpen] = useState(false)
+    const [confirmClear, setConfirmClear] = useState(false)
+    const [clearing, setClearing] = useState(false)
     const [scope, setScope] = useState('all')
     const [workspaceFilter, setWorkspaceFilter] = useState(null)
     const [repeating, setRepeating] = useState(null)
@@ -2008,6 +2032,33 @@ export function createClientPlugin(require) {
       })
     }
 
+    /**
+     * Clear every finished entry from the list.
+     *
+     * The confirm dialog guards it and the Host deletes only settled records, so
+     * a waiting, failed or repeat message can never be lost here. The notice
+     * reports how many entries actually left, which is the Host's answer rather
+     * than a guess made from the rows this tab happens to show.
+     */
+    const clearHistory = () => {
+      setClearing(true)
+      postJson(clearHistoryUrl(allScope), {}).then((value) => {
+        const removed = Number.isFinite(value?.removed) && value.removed > 0 ? Math.trunc(value.removed) : 0
+        setSentOpen(false)
+        bumpRefresh()
+        setNotice(t(removed === 1 ? 'panel.noticeClearedOne' : 'panel.noticeClearedMany', { count: removed }))
+      }, (error) => {
+        // A 404 here means the page is newer than the Host half that is running:
+        // the bundle is served from disk on a refresh, but the routes are only
+        // registered at boot, so the fix is a real restart, not a retry.
+        const message = typeof error?.message === 'string' ? error.message : ''
+        setNotice(message.includes('404') ? t('panel.clearHistoryUnavailable') : errorText(t, error))
+      }).then(() => {
+        setClearing(false)
+        setConfirmClear(false)
+      })
+    }
+
     const openEditor = (record, element) => {
       let opener = element === undefined ? null : element
       if (opener === null && typeof document !== 'undefined' && document.activeElement !== null) {
@@ -2064,6 +2115,12 @@ export function createClientPlugin(require) {
 
     const now = Date.now()
     const groups = buildGroups(items, now, zone, locale, null)
+    // Finished entries are the only thing Clear history touches, so the button
+    // appears exactly when there is something to clear — including entries the
+    // 24 h window keeps off the list, which the Host counts for us.
+    const finishedCount = Number.isFinite(allState.finished) && allState.finished > 0
+      ? allState.finished
+      : core.historyTargets(items).length
     const repeatingModel = repeatingView(repeating)
     const count = countText(core.countPending(items))
     const firstLoad = !allState.loaded
@@ -2075,22 +2132,32 @@ export function createClientPlugin(require) {
         h('header', { className: 'dsm-page-head' },
           h('h1', { className: 'dsm-page-title' }, t('panel.title')),
           h('p', { className: 'dsm-page-count' }, t(count.key, count.params)),
-          workspaceFilter === null
-            ? null
-            : h('div', { className: 'dsm-scope', role: 'group', 'aria-label': t('panel.scope') },
-              h('button', {
+          h('div', { className: 'dsm-page-tools' },
+            finishedCount > 0
+              ? h('button', {
                 type: 'button',
-                className: 'dsm-scope-btn' + (scope === 'all' ? ' dsm-scope-on' : ''),
-                'aria-pressed': scope === 'all',
-                onClick: () => chooseScope('all'),
-              }, t('panel.scopeAll')),
-              h('button', {
-                type: 'button',
-                className: 'dsm-scope-btn' + (scope === 'workspace' ? ' dsm-scope-on' : ''),
-                'aria-pressed': scope === 'workspace',
-                title: workspaceFilter.workspaceTitle,
-                onClick: () => chooseScope('workspace'),
-              }, t('panel.scopeWorkspace'))),
+                className: 'dsm-page-clear',
+                disabled: clearing,
+                title: t('panel.clearHistory'),
+                onClick: () => setConfirmClear(true),
+              }, t('panel.clearHistory'))
+              : null,
+            workspaceFilter === null
+              ? null
+              : h('div', { className: 'dsm-scope', role: 'group', 'aria-label': t('panel.scope') },
+                h('button', {
+                  type: 'button',
+                  className: 'dsm-scope-btn' + (scope === 'all' ? ' dsm-scope-on' : ''),
+                  'aria-pressed': scope === 'all',
+                  onClick: () => chooseScope('all'),
+                }, t('panel.scopeAll')),
+                h('button', {
+                  type: 'button',
+                  className: 'dsm-scope-btn' + (scope === 'workspace' ? ' dsm-scope-on' : ''),
+                  'aria-pressed': scope === 'workspace',
+                  title: workspaceFilter.workspaceTitle,
+                  onClick: () => chooseScope('workspace'),
+                }, t('panel.scopeWorkspace')))),
           notice !== null ? h('p', { className: 'dsm-page-notice', role: 'status' }, notice) : null),
         failure !== null
           ? h('p', { className: 'dsm-error dsm-page-error', role: 'alert' },
@@ -2132,6 +2199,20 @@ export function createClientPlugin(require) {
             others: items,
             onNotice: (text) => setNotice(text),
             onClose: closeEditor,
+          })
+          : null,
+        confirmClear
+          ? h(ConfirmDialog, {
+            t,
+            title: t('panel.clearHistoryTitle'),
+            body: t('panel.clearHistoryBody'),
+            confirmLabel: t('panel.clearHistoryYes'),
+            cancelLabel: t('panel.clearHistoryKeep'),
+            busy: clearing,
+            onConfirm: clearHistory,
+            onCancel: () => {
+              if (!clearing) setConfirmClear(false)
+            },
           })
           : null))
   }
@@ -3029,6 +3110,14 @@ export function createClientPlugin(require) {
 .dsm-page-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .dsm-page-title{margin:0;font-size:20px;font-weight:600;line-height:1.2}
 .dsm-page-count{margin:0;font-size:13px;color:var(--dsw-alias-label-secondary,#71717a)}
+.dsm-page-tools{display:flex;align-items:center;align-self:center;gap:10px;margin-left:auto}
+.dsm-page-tools .dsm-scope{margin-left:0}
+.dsm-page-clear{height:26px;padding:0 12px;border-radius:999px;cursor:pointer;font:inherit;
+  font-size:11.5px;font-weight:650;border:1px solid ${ORANGE};background:${ORANGE};color:#fff;
+  transition:background .15s ease,opacity .15s ease}
+.dsm-page-clear:hover:not([disabled]){background:${ORANGE_HOVER};border-color:${ORANGE_HOVER}}
+.dsm-page-clear:focus-visible{outline:2px solid ${ORANGE};outline-offset:2px}
+.dsm-page-clear:disabled{opacity:.55;cursor:default}
 .dsm-page-spacer{flex:1 1 auto}
 .dsm-page-notice{margin:0;font-size:12.5px;color:var(--dsw-alias-label-secondary,#52525b);
   background:var(--dsw-alias-bg-layer-2,#f4f4f5);border:1px solid var(--dsw-alias-border-l1,#e4e4e7);
@@ -3055,7 +3144,7 @@ export function createClientPlugin(require) {
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsm-repeating-rule{font-size:11px;color:var(--dsw-alias-label-secondary,#71717a);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media (pointer:coarse){.dsm-scope-btn{min-height:32px;padding:0 12px}}
+@media (pointer:coarse){.dsm-scope-btn{min-height:32px;padding:0 12px}.dsm-page-clear{min-height:32px}}
 .dsm-cards{display:flex;flex-direction:column;gap:8px}
 .dsm-card{position:relative;display:flex;gap:14px;align-items:flex-start;padding:12px 14px;border-radius:12px;
   border:1px solid var(--dsw-alias-border-l1,#e4e4e7);background:var(--dsw-alias-bg-layer-1,#fafafa);
@@ -3317,6 +3406,10 @@ export function createClientPlugin(require) {
      */
     __internals: {
       panelId: PANEL_ID,
+      ScheduledPage,
+      // The tab's shared store, so a test can render the page with the rows and
+      // finished count a live /list-all answer would have left behind. Test-only.
+      allState,
       EditorSheet,
       ConfirmDialog,
       openPanel,
@@ -3329,6 +3422,7 @@ export function createClientPlugin(require) {
       groupHeading,
       headingText,
       buildGroups,
+      historyTargets: core.historyTargets,
       buildUpdate,
       draftOf,
       draftPayload,
@@ -3347,6 +3441,7 @@ export function createClientPlugin(require) {
       resolveWorkspaceFilter,
       repeatingView,
       listAllUrl,
+      clearHistoryUrl,
       rememberOpenSession,
       openSessionId: () => lastOpenSessionId,
       sessionIndexOf,

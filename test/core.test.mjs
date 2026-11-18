@@ -35,6 +35,7 @@ import {
   earliestPending,
   estimateBase64Bytes,
   groupRecords,
+  historyTargets,
   isDeepSeekModel,
   isDeepSeekPeak,
   isLate,
@@ -385,6 +386,23 @@ test('retention drops finished records older than seven days', () => {
     { id: 'old-failed', status: 'failed', updatedAt: new Date(now - RETENTION_MS - 1).toISOString() },
   ]
   assert.deepEqual(pruneTargets(rows, now).sort(), ['old-cancelled', 'old-sent'])
+})
+
+test('clearing history selects exactly the settled records', () => {
+  const rows = [
+    { id: 'sent-old', status: 'sent', sentAt: new Date(NOW - RETENTION_MS * 2).toISOString() },
+    { id: 'cancelled', status: 'cancelled', updatedAt: new Date(NOW).toISOString() },
+    { id: 'pending', status: 'pending', dueAt: new Date(NOW + 1000).toISOString() },
+    { id: 'sending', status: 'sending', dueAt: new Date(NOW - 1000).toISOString() },
+    { id: 'failed', status: 'failed', dueAt: new Date(NOW - 1000).toISOString() },
+    { id: '', status: 'sent' },
+    { id: 'unknown', status: 'archived' },
+    null,
+  ]
+  assert.deepEqual(historyTargets(rows), ['sent-old', 'cancelled'],
+    'settled rows of any age are selected; waiting, sending, failed and malformed rows are not')
+  assert.deepEqual(historyTargets([]), [])
+  assert.deepEqual(historyTargets(undefined), [])
 })
 
 test('the strip summary counts pending records and names the next one', () => {

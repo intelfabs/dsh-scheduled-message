@@ -32,6 +32,7 @@ import {
   SENT_WINDOW_MS,
   buildRrule,
   earliestPending,
+  historyTargets,
   isLate,
   nextUpdatedAt,
   parseRecord,
@@ -887,6 +888,69 @@ async function handleCreate(scheduler, body) {
 }
 
 /**
+ * Read the scope one tab request asks for.
+ *
+ * /list-all and /clear-history share this reading, so the Clear history button
+ * can only ever clear what the list it sits on was showing.
+ * @param url - parsed request URL.
+ * @returns one scope value, or an error envelope.
+ */
+function readListScope(url) {
+  const scope = url.searchParams.get('scope') ?? 'all'
+  if (scope !== 'all' && scope !== 'workspace') {
+    return { error: jsonError(CODES.invalidRequest, 'scope must be all or workspace.') }
+  }
+  const workspaceId = url.searchParams.get('workspaceId')
+  if (scope === 'workspace' && (workspaceId === null || workspaceId.length === 0)) {
+    return { error: jsonError(CODES.invalidRequest, 'A workspaceId query parameter is required for scope=workspace.') }
+  }
+  return scope === 'all' ? { kind: 'all' } : { kind: 'workspace', workspaceId }
+}
+
+/**
+ * The records one scope selects, whatever their status.
+ *
+ * An unknown workspace selects nothing, exactly like the tab does.
+ * @param scheduler - owning store.
+ * @param scope - a value from readListScope.
+ * @returns the records the scope covers.
+ */
+async function recordsInScope(scheduler, scope) {
+  const records = await scheduler.records()
+  if (scope.kind === 'all') return records
+  const workspace = (await scheduler.workspaces()).find(candidate => candidate.id === scope.workspaceId)
+  if (workspace === undefined) return []
+  const sessionIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []
+  return records.filter((record) => {
+    const resolved = resolveSessionId(record)
+    if (resolved !== undefined) return sessionIds.includes(resolved)
+    return record.target.kind === 'new' && record.target.workspaceId === scope.workspaceId
+  })
+}
+/**
+ * Remove every finished entry the Scheduled tab's scope covers.
+ *
+ * Only records that already settled — delivered (`sent`) or given up
+ * (`cancelled`) — are deleted. A message still waiting, one left `sending` by a
+ * crash, or one that failed and waits for Retry always survives, so clearing
+ * history can never cancel a delivery or hide work that still needs attention.
+ * Nothing else is touched: conversations keep the messages they received, and an
+ * Automation task is a rule in another service, not a record here.
+ * @param scheduler - owning store.
+ * @param request - inbound request carrying scope and an optional workspaceId.
+ */
+async function handleClearHistory(scheduler, request) {
+  const scope = readListScope(new URL(request.url, 'http://localhost'))
+  if (scope.error !== undefined) return scope.error
+  return await scheduler.exclusive(async () => {
+    const table = await scheduler.table()
+    const ids = historyTargets(await recordsInScope(scheduler, scope))
+    for (const id of ids) await table.delete(id)
+    return jsonOk({ removed: ids.length })
+  })
+}
+
+/**
  * Read the record selection the composer strip asks for.
  * @param scheduler - owning store.
  * @param request - inbound request carrying the sessionId query parameter.
@@ -913,29 +977,17 @@ async function handleList(scheduler, request) {
  */
 async function handleListAll(scheduler, request) {
   const url = new URL(request.url, 'http://localhost')
-  const scope = url.searchParams.get('scope') ?? 'all'
-  if (scope !== 'all' && scope !== 'workspace') {
-    return jsonError(CODES.invalidRequest, 'scope must be all or workspace.')
-  }
-  const workspaceId = url.searchParams.get('workspaceId')
-  if (scope === 'workspace' && (workspaceId === null || workspaceId.length === 0)) {
-    return jsonError(CODES.invalidRequest, 'A workspaceId query parameter is required for scope=workspace.')
-  }
+  const scope = readListScope(url)
+  if (scope.error !== undefined) return scope.error
   const now = Date.now()
-  let records = (await scheduler.records()).filter(record => listedInTab(record, now))
-  if (scope === 'workspace') {
-    const workspace = (await scheduler.workspaces()).find(candidate => candidate.id === workspaceId)
-    if (workspace === undefined) return jsonOk({ items: [], now })
-    const sessionIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : []
-    records = records.filter((record) => {
-      const resolved = resolveSessionId(record)
-      if (resolved !== undefined) return sessionIds.includes(resolved)
-      return record.target.kind === 'new' && record.target.workspaceId === workspaceId
-    })
-  }
+  const scoped = await recordsInScope(scheduler, scope)
+  // finished counts exactly what /clear-history would delete, so the button
+  // follows it even when the 24 h window keeps those rows off the list.
+  const finished = historyTargets(scoped).length
+  const records = scoped.filter(record => listedInTab(record, now))
   const ordered = sortPendingRecords(records)
   const labels = await scheduler.labels(ordered)
-  return jsonOk({ items: ordered.map((record, index) => publicRecord(record, labels[index])), now })
+  return jsonOk({ items: ordered.map((record, index) => publicRecord(record, labels[index])), now, finished })
 }
 
 /**
@@ -1212,7 +1264,7 @@ async function handleRepeating(scheduler) {
 }
 
 /**
- * Register the durable store, the thirteen HTTP routes and the delivery timer.
+ * Register the durable store, the fourteen HTTP routes and the delivery timer.
  * @param ctx - Host plugin context.
  */
 export function apply(ctx) {
@@ -1289,6 +1341,13 @@ export function apply(ctx) {
       methods: ['GET'],
       requestBody: 'buffered',
       fetch: async (request) => await handleListAll(scheduler, request),
+    }))
+
+    routes.push(mount({
+      path: ROUTE_PREFIX + '/clear-history',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => await handleClearHistory(scheduler, request),
     }))
 
     routes.push(mount({

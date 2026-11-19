@@ -3,6 +3,8 @@
 Everything here was checked against the installed harness
 (`DeepSeek Harness 0.2.2-rc.2`, `…/resources/app.asar/dsh/node_modules/@deepseek-ai/…`), not against
 a remembered API. File and line references point at the shipped package sources inside that ASAR.
+0.5.1 re-verified the plugin on `0.2.2-rc.5` with no code changes — see
+[§7.4](#74-re-verified-on-dsh-022-rc5-051).
 
 - [1. Scope](#1-scope)
 - [2. Platform facts](#2-platform-facts)
@@ -499,6 +501,29 @@ observed (§7.3).
    conversation is disposed. The manual check: schedule +30 s to **New conversation** with one file,
    close the source tab, wait, then open the new conversation and confirm the file arrived.
 6. **A physical phone** was never used.
+
+### 7.4 Re-verified on DSH 0.2.2-rc.5 (0.5.1)
+
+2026-11-19, against the running Desktop install: `@deepseek-ai/dsh-desktop-runtime` reports
+`0.2.2-rc.5` in `…/resources/app.asar/dsh/package.json`. No code changed for this release;
+`engines.dsh` (`>=0.2.2-rc.2`) already admits RC5 by semver prerelease ordering.
+
+Observed:
+
+1. `npm test` — 95 tests passing (65 core, 29 client, 1 Host wrapper running 329 assertions);
+   `npm run check` — passes (117 literal locale keys of 167 defined, 229 216 bundle bytes).
+2. The Desktop profile lists `dsh-scheduled-message` in `dsh.profile.bundles`, and the loaded copy
+   under `profiles/desktop/node_modules/dsh-scheduled-message` is byte-identical to this repository
+   for `index.js`, `client.js`, `lib/core.js` and `package.json` (`diff -q`, four SAME).
+3. The RC5 Host booted 2026-11-19 09:06 (Asia/Hong_Kong) and re-wrote the plugin's storage unit
+   `storages/dsh_scheduled_message.json` at 12:05 the same day, so the Host half activated and ran
+   under RC5. The unit still holds the 2026-11-18 delivered records — inside the 7-day retention,
+   so their presence is expected, not a prune failure.
+
+Not re-done in this pass: the authenticated live round trips of §7.2 (the Desktop GUI's API answers
+`401` without its session token, and the bundle URL needs the boot config's `rev`), so no fresh
+end-to-end delivery was performed on RC5 here. Every item in §7.3 still stands. The 0.5.1 claim is
+"loads and runs on RC5, full suite green", not "re-delivered live on RC5".
 
 <a id="8-deviations-from-planmd"></a>
 ## 8. Deviations from PLAN.md

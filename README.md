@@ -94,7 +94,7 @@ adds it to `dsh.profile.bundles` as well. Then restart DSH.
 The market card does the same thing in one click: **Plugins** → **Discover**, search *scheduled
 message*.
 
-Needs DSH `0.2.2-rc.2` or newer (`engines.dsh`).
+Needs DSH `0.2.2-rc.2` or newer (`engines.dsh`), and is verified on `0.2.2-rc.5` — see [Status](#status).
 
 ### Without a package manager
 
@@ -187,8 +187,14 @@ npm run check     # static gates
 
 ## Status
 
-`0.5.0`. 65 core tests, 29 client tests, one Host wrapper running 329 assertions, the static gates
+`0.5.1`. 65 core tests, 29 client tests, one Host wrapper running 329 assertions, the static gates
 and the standalone Host smoke test (329 assertions) all pass.
+
+0.5.1 is a compatibility release: **verified on DSH `0.2.2-rc.5`**, with no code changes. The full
+suite and the static gates pass on it, the copy the Desktop profile loads is byte-identical to this
+repository, and the running RC5 Host re-wrote the plugin's storage unit on the day of the check
+([`docs/DETAIL.md` §7.4](docs/DETAIL.md#74-re-verified-on-dsh-022-rc5-051)). `engines.dsh`
+(`>=0.2.2-rc.2`) already admits RC5, so nothing needed widening.
 
 0.5.0 adds **Clear history** to the Scheduled tab. One button in the header removes the finished rows —
 accepted and cancelled — after a blocking confirmation that spells out exactly what stays. A message
